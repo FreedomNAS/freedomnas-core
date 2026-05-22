@@ -1,0 +1,24 @@
+Source: freedomnas-core
+Section: admin
+Priority: optional
+Maintainer: FreedomNAS Team <dev@freedomnas.io>
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13), python3-all, python3-setuptools
+Homepage: https://codeberg.org/freedomnas/freedomnas-core
+Vcs-Browser: https://codeberg.org/freedomnas/freedomnas-core
+Vcs-Git: https://codeberg.org/freedomnas/freedomnas-core.git
+
+Package: freedomnas-core
+Architecture: all
+Depends: ${python3:Depends}, python3 (>= 3.7)
+Recommends: zfsutils-linux | zfs-fuse
+Description: FreedomNAS Core Engine — OS-agnostic storage appliance
+ The FreedomNAS Core Engine provides:
+  • Universal OS abstraction via JSON Translator Layer
+  • Support for Debian, FreeBSD, and Arch Linux
+  • ZFS pool and dataset management
+  • Network and user configuration
+  • System provisioning and disaster recovery
+ .
+ Install this package to get the freedomnas.engine and freedomnas.config
+ Python modules for building storage appliances and deployment tools.

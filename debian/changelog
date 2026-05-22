@@ -1,0 +1,9 @@
+freedomnas-core (4.0.0-1) unstable; urgency=medium
+
+  * Initial release
+  * OS-agnostic storage appliance engine
+  * JSON Translator Layer for multi-OS support
+  * ZFS pool management
+  * System provisioning and configuration
+
+ -- FreedomNAS Team <dev@freedomnas.io>  Thu, 22 May 2026 14:00:00 +0000

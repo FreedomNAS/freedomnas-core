@@ -1,0 +1,17 @@
+post_install() {
+    echo "FreedomNAS Core Engine installed successfully."
+    echo ""
+    echo "To use the FreedomNAS engine in your Python projects:"
+    echo "  from freedomnas.engine import FreedomNASEngine"
+    echo "  from freedomnas.config import ConfigurationManager"
+    echo ""
+    echo "OS profiles are located at: /usr/lib/freedomnas/profiles/"
+}
+
+post_upgrade() {
+    echo "FreedomNAS Core Engine upgraded."
+}
+
+pre_remove() {
+    echo "Removing FreedomNAS Core Engine..."
+}
