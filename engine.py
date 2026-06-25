@@ -177,11 +177,11 @@ class FreedomNASEngine:
         """
         # Try multiple locations to support both installer and webui
         possible_paths = [
-            Path(__file__).parent.parent / "freedomnas-profiles",  # dev repo root
-            Path(__file__).parent.parent / "os_profiles",  # lib/core/engine.py -> lib/os_profiles/
-            Path(__file__).parent / "os_profiles",         # Direct neighbor
-            Path("/opt/freedomnas/lib/os_profiles"),       # System installation
-            Path("/usr/local/freedomnas/lib/os_profiles"), # Alternative system location
+            Path("/usr/lib/freedomnas/profiles"),                   # system install (spec §3.5)
+            Path(__file__).parent.parent / "freedomnas-profiles",   # dev sibling repo
+            Path(__file__).parent.parent / "os_profiles",           # dev local
+            Path(__file__).parent / "os_profiles",                  # dev local
+            Path("/opt/freedomnas/lib/os_profiles"),                 # alternative
         ]
         
         for path in possible_paths:
@@ -342,7 +342,95 @@ class FreedomNASEngine:
         # Execute single command
         logger.debug(f"Executing command: {command_template}")
         return self._run_safe(command_template, timeout, check)
-    
+
+    def execute_with_stdin(
+        self,
+        category: str,
+        action: str,
+        stdin_data: str,
+        timeout: int = 30,
+        **kwargs
+    ) -> Tuple[str, str]:
+        """
+        Execute a command, piping data to its stdin.
+
+        Used for operations where sensitive data (e.g. passwords) must be
+        passed via stdin rather than the command string, so they never appear
+        in ps output or logs.  Always runs with shell=False.
+
+        Args:
+            category: Command category
+            action: Action within the category
+            stdin_data: String to pipe to the process stdin
+            timeout: Command timeout in seconds (default: 30)
+            **kwargs: Template variables for the command
+
+        Returns:
+            Tuple[str, str]: (stdout, stderr)
+
+        Raises:
+            CommandTranslationError: If the command is a sequence (not allowed here)
+            CommandExecutionError: If the command fails
+        """
+        command = self.get_command(category, action, **kwargs)
+
+        if isinstance(command, list):
+            raise CommandTranslationError(
+                f"{category}.{action} is a command sequence — "
+                "execute_with_stdin requires a single command"
+            )
+
+        logger.debug(f"Executing command with stdin: {command}")
+        try:
+            result = subprocess.run(
+                shlex.split(command),
+                input=stdin_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                raise CommandExecutionError(
+                    f"Command failed with exit code {result.returncode}\n"
+                    f"Command: {command}\n"
+                    f"Stderr: {result.stderr}"
+                )
+            return result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            raise CommandExecutionError(
+                f"Command timed out after {timeout}s: {command}"
+            )
+        except CommandExecutionError:
+            raise
+        except Exception as e:
+            raise CommandExecutionError(
+                f"Error executing command: {command}\nError: {e}"
+            )
+
+    def get_profile_value(self, category: str, key: str) -> str:
+        """
+        Return a non-command value from the profile (e.g. config_file paths,
+        service names like smb_service or nfs_service).
+
+        Args:
+            category: Profile category (e.g. "samba", "nfs")
+            key: Key within the category (e.g. "config_file", "smb_service")
+
+        Returns:
+            str: The value from the profile
+
+        Raises:
+            CommandTranslationError: If the category or key does not exist
+        """
+        try:
+            return self.profile[category][key]
+        except KeyError:
+            available = list(self.profile.get(category, {}).keys())
+            raise CommandTranslationError(
+                f"Profile value not found: {category}.{key}\n"
+                f"Available keys in '{category}': {', '.join(available)}"
+            )
+
     def _run_safe(
         self,
         command: str,

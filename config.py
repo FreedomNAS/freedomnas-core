@@ -527,7 +527,29 @@ class ConfigurationManager:
     def get_nfs_shares(self) -> List[Dict[str, Any]]:
         """Get all NFS share configurations"""
         return self.config["shares"]["nfs"]
-    
+
+    def add_nfs_share(self, share_config: Dict[str, Any]) -> None:
+        """Add or update an NFS share"""
+        share_name = share_config.get("name")
+        if not share_name:
+            raise ConfigurationException("NFS share must have 'name'")
+
+        self.config["shares"]["nfs"] = [
+            s for s in self.config["shares"]["nfs"]
+            if s.get("name") != share_name
+        ]
+
+        self.config["shares"]["nfs"].append(share_config)
+        self.save()
+
+    def remove_nfs_share(self, name: str) -> None:
+        """Remove an NFS share"""
+        self.config["shares"]["nfs"] = [
+            s for s in self.config["shares"]["nfs"]
+            if s.get("name") != name
+        ]
+        self.save()
+
     # Updates configuration methods
     
     def is_topgrade_configured(self) -> bool:
