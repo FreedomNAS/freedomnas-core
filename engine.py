@@ -113,10 +113,13 @@ class FreedomNASEngine:
             
             self.os_type = os_override or self._detect_os()
             self.profile_dir = Path(profile_dir or self._get_default_profile_dir())
-            self.profile = self._load_profile()
-            
+            self.profile, self.init_system = self._load_profile()
+
             self.__class__._initialized = True
-            logger.info(f"FreedomNAS Engine initialized for {self.os_type}")
+            logger.info(
+                f"FreedomNAS Engine initialized for {self.os_type} "
+                f"(init: {self.init_system})"
+            )
     
     def _detect_os(self) -> str:
         """
@@ -194,37 +197,131 @@ class FreedomNASEngine:
             f"Searched: {', '.join(str(p) for p in possible_paths)}"
         )
     
-    def _load_profile(self) -> Dict[str, Any]:
+    def _detect_init_system(self) -> str:
         """
-        Load the OS-specific command profile.
-        
+        Detect the running init system.
+
+        Checks filesystem markers in the order defined by spec §4:
+        a) /run/systemd/system  → systemd
+        b) /sbin/openrc or /usr/sbin/openrc  → openrc
+        c) /sbin/runit or /run/runit  → runit
+        d) /usr/bin/s6-svscan  → s6
+        e) /usr/bin/dinit  → dinit
+        f) /etc/rc.d + FreeBSD  → bsd_rc
+        g) fallback: "init_system" field from OS profile
+
         Returns:
-            Dict: OS profile with command templates
-        
+            str: init system identifier (e.g. "systemd", "openrc", ...)
+        """
+        import platform as _platform
+
+        if Path("/run/systemd/system").exists():
+            return "systemd"
+        if Path("/sbin/openrc").exists() or Path("/usr/sbin/openrc").exists():
+            return "openrc"
+        if Path("/sbin/runit").exists() or Path("/run/runit").exists():
+            return "runit"
+        if Path("/usr/bin/s6-svscan").exists():
+            return "s6"
+        if Path("/usr/bin/dinit").exists():
+            return "dinit"
+        if Path("/etc/rc.d").exists() and _platform.system() == "FreeBSD":
+            return "bsd_rc"
+
+        # Fallback: read from OS profile if present
+        declared = self.profile.get("init_system")
+        if declared:
+            logger.debug(f"Init system not detected at runtime; using profile declaration: {declared}")
+            return declared
+
+        logger.warning("Could not detect init system; defaulting to 'systemd'")
+        return "systemd"
+
+    def _load_init_profile(self, init_system: str) -> Optional[Dict[str, Any]]:
+        """
+        Load the init profile for the given init system.
+
+        Searches for {profile_dir}/init/{init_system}.json.
+
+        Returns:
+            dict with the init profile, or None if not found.
+        """
+        init_path = self.profile_dir / "init" / f"{init_system}.json"
+        if not init_path.exists():
+            logger.debug(f"Init profile not found: {init_path}")
+            return None
+        try:
+            with open(init_path, "r") as f:
+                init_profile = json.load(f)
+            logger.debug(f"Loaded init profile: {init_path}")
+            return init_profile
+        except json.JSONDecodeError as exc:
+            raise FreedomNASEngineException(
+                f"Invalid JSON in init profile {init_path}: {exc}"
+            )
+
+    def _load_profile(self) -> Tuple[Dict[str, Any], str]:
+        """
+        Load and merge the OS profile with the appropriate init profile.
+
+        Steps:
+        1. Load OS profile (e.g. debian.json)
+        2. Detect the running init system
+        3. Load init profile (e.g. init/systemd.json)
+        4. Merge: init profile's "services" replaces OS profile's "services"
+        5. Backward compat: if no init profile found and OS profile has
+           "services", keep it with a deprecation warning.
+
+        Returns:
+            Tuple[dict, str]: (merged profile dict, init_system name)
+
         Raises:
-            OSNotSupportedException: If the profile file doesn't exist
+            OSNotSupportedException: If the OS profile file does not exist.
         """
         profile_path = self.profile_dir / f"{self.os_type}.json"
-        
+
         if not profile_path.exists():
             raise OSNotSupportedException(
                 f"OS profile not found: {profile_path}\n"
                 f"Supported profiles: {', '.join(f'{os}.json' for os in self.SUPPORTED_OS)}"
             )
-        
+
         try:
-            with open(profile_path, 'r') as f:
+            with open(profile_path, "r") as f:
                 profile = json.load(f)
-            logger.debug(f"Loaded profile: {profile_path}")
-            return profile
-        except json.JSONDecodeError as e:
+            logger.debug(f"Loaded OS profile: {profile_path}")
+        except json.JSONDecodeError as exc:
             raise FreedomNASEngineException(
-                f"Invalid JSON in profile {profile_path}: {e}"
+                f"Invalid JSON in profile {profile_path}: {exc}"
             )
-        except Exception as e:
+        except Exception as exc:
             raise FreedomNASEngineException(
-                f"Error loading profile {profile_path}: {e}"
+                f"Error loading profile {profile_path}: {exc}"
             )
+
+        # Detect init system (may read profile.get("init_system") as fallback)
+        init_system = self._detect_init_system()
+
+        # Load and merge init profile
+        init_profile = self._load_init_profile(init_system)
+
+        if init_profile is not None:
+            profile["services"] = init_profile["services"]
+            logger.info(f"Merged init profile '{init_system}' into OS profile")
+        elif "services" in profile:
+            # Backward compatibility: OS profile still has services section
+            logger.warning(
+                f"WARNING: OS profile '{self.os_type}' contains a 'services' section. "
+                "This is deprecated. Move service commands to "
+                f"init/{init_system}.json"
+            )
+        else:
+            logger.warning(
+                f"No init profile found for '{init_system}' and OS profile has no "
+                "'services' section. engine.execute('services', ...) will fail."
+            )
+
+        return profile, init_system
     
     @staticmethod
     def _contains_shell_metachar(command: str) -> bool:
@@ -497,15 +594,16 @@ class FreedomNASEngine:
     
     def get_os_info(self) -> Dict[str, str]:
         """
-        Get information about the detected OS.
-        
+        Get information about the detected OS and init system.
+
         Returns:
-            Dict with OS metadata from the profile
+            Dict with OS metadata from the profile, including init_system.
         """
         return {
             "os_name": self.profile.get("os_name", "Unknown"),
             "os_family": self.profile.get("os_family", "Unknown"),
             "os_version": self.profile.get("os_version", "Unknown"),
+            "init_system": self.init_system,
             "detected_type": self.os_type,
         }
     
