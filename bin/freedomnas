@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""FreedomNAS Core CLI entry point — delegates to __main__.py."""
+
+import sys
+import runpy
+
+runpy.run_module("freedomnas", run_name="__main__", alter_sys=True)
