@@ -75,7 +75,8 @@ class ConfigurationManager:
         },
         "reporting": {
             "enabled": False,
-        }
+        },
+        "installed_features": [],
     }
     
     def __init__(self, config_path: Optional[str] = None):
@@ -309,10 +310,19 @@ class ConfigurationManager:
     def get_hostname(self) -> str:
         """Get system hostname"""
         return self.config["system"]["hostname"]
-    
+
     def set_hostname(self, hostname: str) -> None:
         """Set system hostname"""
         self.config["system"]["hostname"] = hostname
+        self.save()
+
+    def get_timezone(self) -> str:
+        """Get system timezone"""
+        return self.config["system"].get("timezone", "UTC")
+
+    def set_timezone(self, timezone: str) -> None:
+        """Set system timezone"""
+        self.config["system"]["timezone"] = timezone
         self.save()
     
     def is_initialized(self) -> bool:
@@ -394,6 +404,20 @@ class ConfigurationManager:
     def get_interface_by_mac(self, mac_address: str) -> Optional[str]:
         """Get logical interface name by MAC address"""
         return self.config["network"]["interfaces_mapping"].get(mac_address)
+
+    def remove_interface(self, logical_name: str) -> None:
+        """Remove an interface configuration by logical name"""
+        self.config["network"]["interfaces"] = [
+            i for i in self.config["network"]["interfaces"]
+            if i.get("logical_name") != logical_name
+        ]
+        # Remove MAC mapping entry if present
+        self.config["network"]["interfaces_mapping"] = {
+            mac: name
+            for mac, name in self.config["network"]["interfaces_mapping"].items()
+            if name != logical_name
+        }
+        self.save()
     
     # User configuration methods
     
@@ -458,6 +482,14 @@ class ConfigurationManager:
     def get_pools(self) -> List[Dict[str, Any]]:
         """Get all pool configurations"""
         return self.config["storage"]["pools"]
+
+    def remove_pool(self, pool_name: str) -> None:
+        """Remove a ZFS pool from configuration (does not export/destroy the pool)"""
+        self.config["storage"]["pools"] = [
+            p for p in self.config["storage"]["pools"]
+            if p.get("name") != pool_name
+        ]
+        self.save()
     
     def add_root_snapshot(self, snapshot_name: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -550,6 +582,50 @@ class ConfigurationManager:
         ]
         self.save()
 
+    def remove_smb_share(self, share_name: str) -> None:
+        """Remove a Samba share"""
+        self.config["shares"]["smb"] = [
+            s for s in self.config["shares"]["smb"]
+            if s.get("name") != share_name
+        ]
+        self.save()
+
+    # Installed features — track which optional features are active
+
+    def get_installed_features(self) -> List[Dict[str, Any]]:
+        """Get all installed feature records"""
+        return self.config.get("installed_features", [])
+
+    def add_installed_feature(
+        self,
+        feature_id: str,
+        enabled: bool = True,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Add or update an installed feature record"""
+        record: Dict[str, Any] = {
+            "id": feature_id,
+            "enabled": enabled,
+            "installed_at": datetime.now().isoformat(),
+        }
+        if metadata:
+            record.update(metadata)
+
+        self.config["installed_features"] = [
+            f for f in self.config.get("installed_features", [])
+            if f.get("id") != feature_id
+        ]
+        self.config["installed_features"].append(record)
+        self.save()
+
+    def remove_installed_feature(self, feature_id: str) -> None:
+        """Remove an installed feature record"""
+        self.config["installed_features"] = [
+            f for f in self.config.get("installed_features", [])
+            if f.get("id") != feature_id
+        ]
+        self.save()
+
     # Updates configuration methods
     
     def is_topgrade_configured(self) -> bool:
@@ -590,8 +666,16 @@ class ConfigurationManager:
         self.save()
     
     def to_dict(self) -> Dict[str, Any]:
-        """Get the entire configuration as a dictionary"""
-        return copy.deepcopy(self.config)
+        """
+        Return the configuration as a dictionary.
+
+        Adds flat smb_shares / nfs_shares aliases at the top level so that
+        the ReconciliationEngine can address shares without nesting into shares.smb.
+        """
+        result = copy.deepcopy(self.config)
+        result["smb_shares"] = result.get("shares", {}).get("smb", [])
+        result["nfs_shares"] = result.get("shares", {}).get("nfs", [])
+        return result
     
     def __repr__(self) -> str:
         """String representation"""
