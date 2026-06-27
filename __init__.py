@@ -8,6 +8,7 @@ try:
         CommandExecutionError,
     )
     from .config import ConfigurationManager, ConfigurationException
+    from .orchestrator import Orchestrator, FreedomNASModule, ModuleState, ModuleStatus
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -18,6 +19,7 @@ except ImportError:
         CommandExecutionError,
     )
     from config import ConfigurationManager, ConfigurationException  # type: ignore[no-redef]
+    from orchestrator import Orchestrator, FreedomNASModule, ModuleState, ModuleStatus  # type: ignore[no-redef]
 
 __all__ = [
     "FreedomNASEngine",
@@ -28,4 +30,8 @@ __all__ = [
     "CommandExecutionError",
     "ConfigurationManager",
     "ConfigurationException",
+    "Orchestrator",
+    "FreedomNASModule",
+    "ModuleState",
+    "ModuleStatus",
 ]
