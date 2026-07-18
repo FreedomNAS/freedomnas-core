@@ -1,10 +1,10 @@
 # FreedomNAS Core Engine
 
-Il cuore universale di FreedomNAS - il motore di traduzione OS-agnostico che permette al middleware di funzionare su Debian, FreeBSD e altre distribuzioni.
+The universal heart of FreedomNAS — the OS-agnostic translation engine that lets the middleware run on Debian, FreeBSD, and other distributions.
 
-## Concetto Chiave: JSON Translator Layer
+## Key Concept: JSON Translator Layer
 
-Invece di avere codice specifico per ogni OS sparso nel codebase, FreedomNAS Core implementa un **singolo strato di traduzione** che converte azioni astratte in comandi OS-specifici.
+Instead of scattering OS-specific code throughout the codebase, FreedomNAS Core implements a **single translation layer** that converts abstract actions into OS-specific commands.
 
 ```
 [WebUI/Installer] 
@@ -18,33 +18,33 @@ FreeBSD: service samba restart
 Arch: systemctl restart samba
 ```
 
-## File Componenti
+## Components
 
-- **engine.py**: Il motore principale
-- **config.py**: Gestione della configurazione persistente
-- **os_profiles/**: Directory contente i profili JSON per ogni OS
+- **engine.py**: The main engine
+- **config.py**: Persistent configuration management
+- **os_profiles/**: Directory containing the JSON profiles for each OS
 
-## Uso Veloce
+## Quick Usage
 
-### Ottenere un Comando (senza eseguire)
+### Getting a Command (without executing it)
 
 ```python
 from freedomnas_core.engine import FreedomNASEngine
 
 engine = FreedomNASEngine()
 
-# Ottenere il comando nativo
+# Get the native command
 cmd = engine.get_command("services", "restart", service_name="samba")
-print(cmd)  # Output: systemctl restart samba (su Debian)
+print(cmd)  # Output: systemctl restart samba (on Debian)
 ```
 
-### Eseguire un Comando
+### Executing a Command
 
 ```python
-# Eseguire direttamente
+# Execute directly
 stdout, stderr = engine.execute("services", "restart", service_name="samba")
 
-# Con parametri customizzati
+# With custom parameters
 stdout, stderr = engine.execute(
     "packages", 
     "install", 
@@ -53,10 +53,10 @@ stdout, stderr = engine.execute(
 )
 ```
 
-### Operazioni ZFS
+### ZFS Operations
 
 ```python
-# Creare un pool ZFS
+# Create a ZFS pool
 stdout, stderr = engine.execute(
     "zfs",
     "pool_create",
@@ -67,32 +67,32 @@ stdout, stderr = engine.execute(
     devices="/dev/sda /dev/sdb /dev/sdc"
 )
 
-# Lista pool
+# List pools
 cmd = engine.get_command("zfs", "pool_list")
 print(cmd)
 ```
 
-### Gestire i Servizi
+### Managing Services
 
 ```python
-# Avviare un servizio
+# Start a service
 engine.execute("services", "start", service_name="samba")
 
-# Abilitare al boot
+# Enable at boot
 engine.execute("services", "enable", service_name="samba")
 
-# Controllare lo stato
+# Check status
 stdout, stderr = engine.execute("services", "status", service_name="samba")
 ```
 
-## Architettura
+## Architecture
 
 ### Singleton Pattern
 
-L'engine implementa il pattern Singleton per garantire che esista una sola istanza:
+The engine implements the Singleton pattern to guarantee a single instance exists:
 
 ```python
-# Tutte queste sono la stessa istanza
+# These are all the same instance
 engine1 = FreedomNASEngine()
 engine2 = FreedomNASEngine()
 assert engine1 is engine2  # True!
@@ -100,23 +100,23 @@ assert engine1 is engine2  # True!
 
 ### Thread-Safe
 
-L'inizializzazione usa lock per sicurezza in ambienti multi-thread.
+Initialization uses locking for safety in multi-threaded environments.
 
 ### Auto-Detect OS
 
-L'engine rileva automaticamente l'OS durante l'inizializzazione:
+The engine automatically detects the OS during initialization:
 
 ```python
-# Auto-detect (Debian, FreeBSD, Arch, ecc.)
+# Auto-detect (Debian, FreeBSD, Arch, etc.)
 engine = FreedomNASEngine()
 
-# O forza un OS per testing
+# Or force a specific OS for testing
 engine = FreedomNASEngine(os_override="freebsd")
 ```
 
-## Profili OS
+## OS Profiles
 
-Ogni distribuzione ha il suo profilo JSON con la mappatura dei comandi:
+Each distribution has its own JSON profile with the command mapping:
 
 ```json
 {
@@ -138,79 +138,79 @@ Ogni distribuzione ha il suo profilo JSON con la mappatura dei comandi:
 }
 ```
 
-### Categorie Supportate
+### Supported Categories
 
-- **users**: Gestione utenti (create, delete, add_to_group, ecc.)
-- **services**: Gestione servizi (start, stop, restart, enable, disable, ecc.)
-- **network**: Configurazione rete (interface, bridge, IP, hostname, ecc.)
-- **packages**: Gestione pacchetti (install, remove, upgrade, ecc.)
-- **zfs**: Operazioni ZFS (pool, dataset, snapshot, ecc.)
-- **samba**: Configurazione SMB/CIFS
-- **nfs**: Configurazione NFS
-- **btrfs**: Operazioni Btrfs filesystem
-- **grub_btrfs**: Boot con snapshot Btrfs
-- **system**: Informazioni e configurazioni di sistema
+- **users**: User management (create, delete, add_to_group, etc.)
+- **services**: Service management (start, stop, restart, enable, disable, etc.)
+- **network**: Network configuration (interface, bridge, IP, hostname, etc.)
+- **packages**: Package management (install, remove, upgrade, etc.)
+- **zfs**: ZFS operations (pool, dataset, snapshot, etc.)
+- **samba**: SMB/CIFS configuration
+- **nfs**: NFS configuration
+- **btrfs**: Btrfs filesystem operations
+- **grub_btrfs**: Boot with Btrfs snapshots
+- **system**: System information and configuration
 
-## Gestione della Configurazione
+## Configuration Management
 
-La classe `ConfigurationManager` gestisce la configurazione persistente in YAML:
+The `ConfigurationManager` class handles persistent configuration in YAML:
 
 ```python
 from freedomnas_core.config import ConfigurationManager
 
 config = ConfigurationManager()
 
-# Leggere configurazione
+# Read configuration
 hostname = config.get_hostname()
 users = config.get_users()
 
-# Modificare configurazione
+# Modify configuration
 config.set_hostname("new-hostname")
 config.add_user({
     "username": "john",
     "uid": 1001,
     "groups": ["sudo"]
 })
-config.save()  # Salva atomicamente
+config.save()  # Saves atomically
 ```
 
-La configurazione è memorizzata in:
-1. Dataset ZFS: `/mnt/zpool/.freedomnas/config.yaml` (primaria)
+The configuration is stored in:
+1. ZFS dataset: `/mnt/zpool/.freedomnas/config.yaml` (primary)
 2. Backup: `/etc/freedomnas/config.yaml` (fallback)
 
-## Sicurezza
+## Security
 
-### Protezione Injection
+### Injection Protection
 
-I comandi sono eseguiti senza shell, prevenendo injection attacks:
+Commands are executed without a shell, preventing injection attacks:
 
 ```python
-# Sicuro: i parametri non sono interpretati dalla shell
+# Safe: parameters are not interpreted by the shell
 engine.execute("users", "create", username="attacker'; rm -rf /")
-# Esegue: useradd -m -s /bin/bash attacker'; rm -rf /
-# (come username letterale, non come codice shell)
+# Runs: useradd -m -s /bin/bash attacker'; rm -rf /
+# (as a literal username, not as shell code)
 ```
 
-### File di Configurazione
+### Configuration File
 
-La configurazione è salvata con permessi `0o600` (lettura/scrittura solo owner):
+The configuration is saved with `0o600` permissions (owner read/write only):
 
 ```
 -rw------- 1 root root config.yaml
 ```
 
-### Backup Atomico
+### Atomic Backup
 
-Le operazioni di salvataggio sono atomiche:
-1. Scrivi su file temporaneo
-2. Backup del file esistente
-3. Rename atomico
+Save operations are atomic:
+1. Write to a temporary file
+2. Back up the existing file
+3. Atomic rename
 
-Se qualcosa fallisce, il backup viene ripristinato automaticamente.
+If anything fails, the backup is restored automatically.
 
-## Integrazione WebUI
+## WebUI Integration
 
-La WebUI usa lo stesso engine:
+The WebUI uses the same engine:
 
 ```python
 from freedomnas_core.engine import FreedomNASEngine
@@ -230,9 +230,9 @@ async def restart_service(service: str):
         return {"status": "error", "message": str(e)}, 500
 ```
 
-## Integrazione Installer
+## Installer Integration
 
-L'installer TUI usa lo stesso engine per eseguire operazioni di sistema:
+The TUI installer uses the same engine to run system operations:
 
 ```python
 from freedomnas_core.engine import FreedomNASEngine
@@ -242,14 +242,14 @@ class DiskInstaller:
         self.engine = FreedomNASEngine()
     
     def partition_disk(self, disk):
-        # Usa engine per partizioni
+        # Use the engine for partitioning
         cmd = self.engine.get_command("disk", "partition", disk=disk)
         self.engine.execute("disk", "partition", disk=disk)
 ```
 
-## Debug e Logging
+## Debugging and Logging
 
-L'engine usa Python logging standard:
+The engine uses standard Python logging:
 
 ```python
 import logging
@@ -258,16 +258,16 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("FreedomNAS.Core")
 
 engine = FreedomNASEngine()
-# Vedrai messaggi di debug nell'output
+# You'll see debug messages in the output
 ```
 
-## Aggiungere Nuovi Profili OS
+## Adding New OS Profiles
 
-Vedi [CONTRIBUTING.md](CONTRIBUTING.md) per una guida dettagliata su come aggiungere supporto per una nuova distribuzione.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a detailed guide on adding support for a new distribution.
 
-## Gestione Errori
+## Error Handling
 
-L'engine fornisce eccezioni specifiche:
+The engine provides specific exceptions:
 
 ```python
 from freedomnas_core.engine import (
@@ -280,23 +280,23 @@ from freedomnas_core.engine import (
 try:
     engine = FreedomNASEngine()
 except OSNotSupportedException as e:
-    print(f"OS non supportato: {e}")
+    print(f"Unsupported OS: {e}")
 except Exception as e:
-    print(f"Errore sconosciuto: {e}")
+    print(f"Unknown error: {e}")
 
 try:
     engine.execute("services", "restart", service_name="samba")
 except CommandTranslationError:
-    print("Comando non disponibile su questo OS")
+    print("Command not available on this OS")
 except CommandExecutionError as e:
-    print(f"Esecuzione comando fallita: {e}")
+    print(f"Command execution failed: {e}")
 ```
 
 ## Roadmap
 
-- [ ] Supporto per più distribuzioni (CentOS, Alpine, ecc.)
-- [ ] Caching dei comandi
-- [ ] Gestione permessi elevated (sudo/doas)
-- [ ] Output parsing strutturato
-- [ ] Integrazione con audit logging
-- [ ] Profili custom per installazioni speciali
+- [ ] Support for more distributions (CentOS, Alpine, etc.)
+- [ ] Command caching
+- [ ] Elevated permission handling (sudo/doas)
+- [ ] Structured output parsing
+- [ ] Audit logging integration
+- [ ] Custom profiles for special installations
