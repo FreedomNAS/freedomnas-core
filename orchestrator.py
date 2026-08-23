@@ -26,8 +26,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
 
-from freedomnas.engine import FreedomNASEngine
-from freedomnas.config import ConfigurationManager
+try:
+    from freedomnas.engine import FreedomNASEngine
+    from freedomnas.config import ConfigurationManager
+except ImportError:
+    from engine import FreedomNASEngine  # type: ignore[no-redef]
+    from config import ConfigurationManager  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Orchestrator")
 

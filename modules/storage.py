@@ -11,9 +11,14 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
-from freedomnas.config import ConfigurationManager
-from freedomnas.orchestrator import FreedomNASModule
+try:
+    from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
+    from freedomnas.config import ConfigurationManager
+    from freedomnas.orchestrator import FreedomNASModule
+except ImportError:
+    from engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError  # type: ignore[no-redef]
+    from config import ConfigurationManager  # type: ignore[no-redef]
+    from orchestrator import FreedomNASModule  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Module.Storage")
 

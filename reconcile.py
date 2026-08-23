@@ -2,7 +2,9 @@
 FreedomNAS Reconciliation Engine
 
 Applies configuration from config.yaml to bring a freshly installed OS to the
-desired state. Used exclusively by the installer — not the WebUI.
+desired state. Used by the (parked) installer and by freedomnas-image-builder's
+baked-in firstboot.sh (via `python -m freedomnas reconcile`, see __main__.py)
+— never by the WebUI directly.
 
 All OS operations delegate to FreedomNASEngine; no subprocess calls here.
 """
@@ -15,12 +17,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
-from freedomnas.engine import (
-    FreedomNASEngine,
-    CommandExecutionError,
-    CommandTranslationError,
-)
-from freedomnas.config import ConfigurationManager
+try:
+    from freedomnas.engine import (
+        FreedomNASEngine,
+        CommandExecutionError,
+        CommandTranslationError,
+    )
+    from freedomnas.config import ConfigurationManager
+except ImportError:
+    from engine import (  # type: ignore[no-redef]
+        FreedomNASEngine,
+        CommandExecutionError,
+        CommandTranslationError,
+    )
+    from config import ConfigurationManager  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
 
