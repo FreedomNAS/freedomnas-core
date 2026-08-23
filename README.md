@@ -72,6 +72,30 @@ cmd = engine.get_command("zfs", "pool_list")
 print(cmd)
 ```
 
+### Encrypted Pools (`keymgmt.py`)
+
+Don't call `zfs.pool_create_encrypted`/`load_key_file` directly — use
+`PoolProvisioner`/`PoolUnlocker`, which also manage the two independent
+USB/passphrase keyslots (scrypt + AES-256-GCM) on top of the engine call:
+
+```python
+from freedomnas.keymgmt import PoolProvisioner, PoolUnlocker
+
+PoolProvisioner(engine).create_encrypted_pool(
+    pool_name="datapool",
+    vdev_type="mirror",
+    devices="/dev/sda /dev/sdb",
+    master_passphrase="correct horse battery staple",  # >= 12 chars
+    usb_devices=["/dev/sdc1"],   # already-mounted-and-writable USB stick(s)
+)
+
+# At boot: python -m freedomnas unlock-pools --tty /dev/console
+locked = PoolUnlocker(engine).list_locked_pools()
+```
+
+See `ARCHITECTURE.md`'s "Encryption Key Management" section in the parent
+repo for the full wrap/unwrap design and the TTY fail-open timeout.
+
 ### Managing Services
 
 ```python
@@ -141,14 +165,14 @@ Each distribution has its own JSON profile with the command mapping:
 ### Supported Categories
 
 - **users**: User management (create, delete, add_to_group, etc.)
-- **services**: Service management (start, stop, restart, enable, disable, etc.)
+- **services**: Service management (start, stop, restart, enable, disable, etc.) — merged in from `init/{init_system}.json`, not the OS profile itself
 - **network**: Network configuration (interface, bridge, IP, hostname, etc.)
 - **packages**: Package management (install, remove, upgrade, etc.)
-- **zfs**: ZFS operations (pool, dataset, snapshot, etc.)
+- **zfs**: ZFS operations (pool, dataset, snapshot, encrypted pools/keys, etc.)
+- **media**: Removable-device list/mount/unmount, used by `keymgmt.py`'s USB zero-touch unlock
 - **samba**: SMB/CIFS configuration
 - **nfs**: NFS configuration
-- **btrfs**: Btrfs filesystem operations
-- **grub_btrfs**: Boot with Btrfs snapshots
+- **btrfs**: Btrfs filesystem operations (Debian profile only — not a supported root filesystem, see `DEVELOPER_GUIDE.md`'s ZFS Best Practices)
 - **system**: System information and configuration
 
 ## Configuration Management
@@ -231,6 +255,10 @@ async def restart_service(service: str):
 ```
 
 ## Installer Integration
+
+> **`freedomnas-installer` is PARKED** (superseded by `freedomnas-image-builder`'s
+> pre-built images, see `IMAGE-BASED-INSTALLATION.md`). It remains functional
+> and uses the same engine below, but is no longer the recommended install path.
 
 The TUI installer uses the same engine to run system operations:
 
