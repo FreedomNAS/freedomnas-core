@@ -6,6 +6,7 @@ Commands:
   check         Validate profiles directory and config file
   unlock-pools  Unlock ZFS-encrypted pools (USB zero-touch, TTY passphrase fallback)
   reconcile     Apply configuration via the ReconciliationEngine
+  serve         Load and start all modules under the Orchestrator, run until stopped
   version       Print package version
 """
 
@@ -13,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 
 
 def cmd_version(_args) -> int:
@@ -159,6 +162,55 @@ def cmd_reconcile(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_serve(_args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas.config import ConfigurationManager
+        from freedomnas.orchestrator import Orchestrator
+        from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        from config import ConfigurationManager  # type: ignore
+        from orchestrator import Orchestrator  # type: ignore
+        from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore
+
+    try:
+        engine = get_engine()
+        config = ConfigurationManager()
+        orchestrator = Orchestrator(engine, config)
+        loader = ModuleLoader(engine, config)
+    except Exception as exc:
+        print(f"ERROR: could not initialise: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        registered = loader.load_all(orchestrator)
+    except ModuleLoaderException as exc:
+        print(f"ERROR: module discovery failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not registered:
+        print("WARNING: no modules registered", file=sys.stderr)
+    else:
+        print(f"Registered modules: {', '.join(registered)}")
+
+    orchestrator.start_all()
+    print("Orchestrator started. Press Ctrl+C to stop.")
+
+    stop_event = threading.Event()
+
+    def _handle_signal(_signum, _frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    stop_event.wait()
+    print("\nStopping...", file=sys.stderr)
+    orchestrator.stop_all()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m freedomnas",
@@ -195,6 +247,7 @@ def main() -> int:
         default=None,
         help="Path to a desired-state YAML file (default: use the config.yaml shadow copy)",
     )
+    sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
     sub.add_parser("version", help="Print package version")
 
     args = parser.parse_args()
@@ -204,6 +257,7 @@ def main() -> int:
         "check":        cmd_check,
         "unlock-pools": cmd_unlock_pools,
         "reconcile":    cmd_reconcile,
+        "serve":        cmd_serve,
         "version":      cmd_version,
     }
 

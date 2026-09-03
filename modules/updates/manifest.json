@@ -1,0 +1,11 @@
+{
+  "id": "updates",
+  "name": "Updates",
+  "version": "1.0.0",
+  "type": "core",
+  "description": "Update configuration consistency (topgrade).",
+  "entry_point": "module:UpdatesModule",
+  "supported_os": ["debian", "freebsd", "arch"],
+  "depends_on": [],
+  "webui": null
+}

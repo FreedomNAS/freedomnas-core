@@ -1,0 +1,11 @@
+{
+  "id": "storage",
+  "name": "Storage",
+  "version": "1.0.0",
+  "type": "core",
+  "description": "ZFS pool lifecycle and health monitoring.",
+  "entry_point": "module:StorageModule",
+  "supported_os": ["debian", "freebsd", "arch"],
+  "depends_on": [],
+  "webui": null
+}

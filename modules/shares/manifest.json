@@ -1,0 +1,11 @@
+{
+  "id": "shares",
+  "name": "Shares",
+  "version": "1.0.0",
+  "type": "core",
+  "description": "SMB and NFS share service health monitoring.",
+  "entry_point": "module:SharesModule",
+  "supported_os": ["debian", "freebsd", "arch"],
+  "depends_on": [],
+  "webui": null
+}

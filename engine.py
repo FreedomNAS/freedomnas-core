@@ -68,6 +68,12 @@ class FreedomNASEngine:
     
     # Supported OS families
     SUPPORTED_OS = ["debian", "freebsd", "arch"]
+
+    # Profile subdirectories that are never treated as module fragments:
+    # "os" holds shared OS-level metadata, "init" holds per-init-system service
+    # commands, "packages" holds distro package-group manifests (unrelated to
+    # engine command profiles).
+    _RESERVED_PROFILE_DIRS = {"os", "init", "packages"}
     
     # Singleton pattern variables
     _instance: Optional['FreedomNASEngine'] = None
@@ -246,7 +252,7 @@ class FreedomNASEngine:
         Returns:
             dict with the init profile, or None if not found.
         """
-        init_path = self.profile_dir / "init" / f"{init_system}.json"
+        init_path = self.profile_dir / "init" / f"init-{init_system}.json"
         if not init_path.exists():
             logger.debug(f"Init profile not found: {init_path}")
             return None
@@ -260,16 +266,45 @@ class FreedomNASEngine:
                 f"Invalid JSON in init profile {init_path}: {exc}"
             )
 
+    def _merge_module_profiles(self, profile: Dict[str, Any]) -> None:
+        """
+        Scan every module's profile subdirectory (e.g. profiles/storage/) and
+        merge in {dirname}/{dirname}-{os_type}.json when present.
+
+        Each module fragment contributes its own top-level category key(s),
+        so there's no overlap to resolve — this is a plain dict.update() per
+        fragment. Reserved directories (_RESERVED_PROFILE_DIRS) are skipped;
+        a directory with no fragment for the current OS is silently skipped
+        too (e.g. a community module that doesn't support this OS).
+        """
+        for entry in sorted(self.profile_dir.iterdir()):
+            if not entry.is_dir() or entry.name in self._RESERVED_PROFILE_DIRS:
+                continue
+            fragment_path = entry / f"{entry.name}-{self.os_type}.json"
+            if not fragment_path.exists():
+                continue
+            try:
+                with open(fragment_path, "r") as f:
+                    fragment = json.load(f)
+            except json.JSONDecodeError as exc:
+                raise FreedomNASEngineException(
+                    f"Invalid JSON in profile fragment {fragment_path}: {exc}"
+                )
+            profile.update(fragment)
+            logger.debug(f"Merged module profile fragment: {fragment_path}")
+
     def _load_profile(self) -> Tuple[Dict[str, Any], str]:
         """
-        Load and merge the OS profile with the appropriate init profile.
+        Load and merge the OS profile with every module's profile fragment,
+        then with the appropriate init profile.
 
         Steps:
-        1. Load OS profile (e.g. debian.json)
-        2. Detect the running init system
-        3. Load init profile (e.g. init/systemd.json)
-        4. Merge: init profile's "services" replaces OS profile's "services"
-        5. Backward compat: if no init profile found and OS profile has
+        1. Load the shared OS profile (profiles/os/os-{os_type}.json)
+        2. Merge in each module's profiles/{module}/{module}-{os_type}.json
+        3. Detect the running init system
+        4. Load init profile (e.g. init/init-systemd.json)
+        5. Merge: init profile's "services" replaces OS profile's "services"
+        6. Backward compat: if no init profile found and OS profile has
            "services", keep it with a deprecation warning.
 
         Returns:
@@ -278,12 +313,12 @@ class FreedomNASEngine:
         Raises:
             OSNotSupportedException: If the OS profile file does not exist.
         """
-        profile_path = self.profile_dir / f"{self.os_type}.json"
+        profile_path = self.profile_dir / "os" / f"os-{self.os_type}.json"
 
         if not profile_path.exists():
             raise OSNotSupportedException(
                 f"OS profile not found: {profile_path}\n"
-                f"Supported profiles: {', '.join(f'{os}.json' for os in self.SUPPORTED_OS)}"
+                f"Supported profiles: {', '.join(f'os-{os}.json' for os in self.SUPPORTED_OS)}"
             )
 
         try:
@@ -299,6 +334,8 @@ class FreedomNASEngine:
                 f"Error loading profile {profile_path}: {exc}"
             )
 
+        self._merge_module_profiles(profile)
+
         # Detect init system (may read profile.get("init_system") as fallback)
         init_system = self._detect_init_system()
 
@@ -313,7 +350,7 @@ class FreedomNASEngine:
             logger.warning(
                 f"WARNING: OS profile '{self.os_type}' contains a 'services' section. "
                 "This is deprecated. Move service commands to "
-                f"init/{init_system}.json"
+                f"init/init-{init_system}.json"
             )
         else:
             logger.warning(
