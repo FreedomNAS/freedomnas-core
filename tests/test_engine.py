@@ -53,6 +53,33 @@ def make_engine(os_override: str = "debian") -> FreedomNASEngine:
     return FreedomNASEngine(profile_dir=PROFILES_DIR, os_override=os_override)
 
 
+# A non-target engine merges the *running host's* init profile, detected at
+# runtime — so a `services` command legitimately differs between a systemd
+# build host and an OpenRC one for the same call. Record the expectation per
+# init system and pick it at assert time, rather than assuming the host runs
+# systemd. Values are what profiles/init/init-<name>.json defines.
+SERVICE_START_BY_INIT = {
+    "systemd": "systemctl start samba",
+    "openrc":  "rc-service samba start",
+    "runit":   "sv start samba",
+    "s6":      "s6-svc -u /run/service/samba",
+    "dinit":   "dinitctl start samba",
+    "bsd_rc":  "service samba start",
+}
+
+
+def expected_service_start(engine: FreedomNASEngine) -> str:
+    """The `services.start` command for the init system this host detected."""
+    expected = SERVICE_START_BY_INIT.get(engine.init_system)
+    if expected is None:
+        pytest.fail(
+            f"No expected services.start recorded for init system "
+            f"'{engine.init_system}' — add one to SERVICE_START_BY_INIT to "
+            f"match profiles/init/init-{engine.init_system}.json"
+        )
+    return expected
+
+
 # ---------------------------------------------------------------------------
 # OS Detection
 # ---------------------------------------------------------------------------
@@ -144,7 +171,7 @@ class TestGetCommand:
     def test_returns_string_for_single_command(self):
         engine = make_engine("debian")
         cmd = engine.get_command("services", "start", service_name="samba")
-        assert cmd == "systemctl start samba"
+        assert cmd == expected_service_start(engine)
 
     def test_returns_list_for_multi_step_command(self):
         engine = make_engine("debian")
@@ -347,8 +374,18 @@ class TestSingleton:
         assert "Debian" in repr(engine)
 
     def test_get_engine_convenience(self):
-        engine = get_engine(profile_dir=PROFILES_DIR)
+        """
+        get_engine() takes no os_override: it describes the machine the tests
+        are running on. That only resolves on a host the engine supports, so
+        on any other dev box (Gentoo, Fedora, ...) there is nothing to assert
+        rather than something to fail.
+        """
+        try:
+            engine = get_engine(profile_dir=PROFILES_DIR)
+        except OSNotSupportedException as exc:
+            pytest.skip(f"host OS unsupported by the engine: {exc}")
         assert isinstance(engine, FreedomNASEngine)
+        assert engine.init_system in SERVICE_START_BY_INIT
 
 
 # ---------------------------------------------------------------------------
