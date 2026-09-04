@@ -126,6 +126,29 @@ assert engine1 is engine2  # True!
 
 Initialization uses locking for safety in multi-threaded environments.
 
+### Target Engines (installer only)
+
+The singleton describes the machine the process runs on — right for the WebUI
+and the modules, useless for an installer provisioning a *different* edition
+into a chroot. `for_target()` returns a fresh, non-singleton engine bound to
+another OS profile:
+
+```python
+# Install Void from a Debian live environment, into /mnt
+target = FreedomNASEngine.for_target("void", root="/mnt")
+target.execute("packages", "install", package_name="zfs")
+# -> chroot /mnt xbps-install -y zfs
+```
+
+- `root=None` (or `"/"`) means "run on the host" — what the in-place install
+  mode wants.
+- With a `root`, every command is prefixed with the profile's
+  `chroot.exec_prefix`, and a command needing a shell is handed to `sh -c`
+  *inside* the chroot, never through the host's shell.
+- The target's init system comes from its own profile declaration; a target
+  engine never probes the running host for it.
+- `get_engine()` and the singleton are untouched by any of this.
+
 ### Auto-Detect OS
 
 The engine automatically detects the OS during initialization:
@@ -256,24 +279,32 @@ async def restart_service(service: str):
 
 ## Installer Integration
 
-> **`freedomnas-installer` is PARKED** (superseded by `freedomnas-image-builder`'s
-> pre-built images, see `IMAGE-BASED-INSTALLATION.md`). It remains functional
-> and uses the same engine below, but is no longer the recommended install path.
+> Pre-built images from `freedomnas-image-builder` are the primary install
+> path (see `IMAGE-BASED-INSTALLATION.md`). `freedomnas-installer` is the
+> secondary one — for hardware that can't be flashed, console installs, and
+> in-place installs onto a running system — and drives everything through
+> this engine.
 
-The TUI installer uses the same engine to run system operations:
+The installer runs *two* engines: the singleton for the machine it is
+running on, and a target engine for the edition being installed:
 
 ```python
-from freedomnas_core.engine import FreedomNASEngine
+from freedomnas.engine import FreedomNASEngine, get_engine
 
-class DiskInstaller:
-    def __init__(self):
-        self.engine = FreedomNASEngine()
-    
-    def partition_disk(self, disk):
-        # Use the engine for partitioning
-        cmd = self.engine.get_command("disk", "partition", disk=disk)
-        self.engine.execute("disk", "partition", disk=disk)
+host = get_engine()                                        # the live system
+target = FreedomNASEngine.for_target("void", root="/mnt")  # what's being installed
+
+# Partitioning uses the host's tools...
+host.execute("partitioning", "create_esp", disk="/dev/sda", esp_size="512MiB")
+
+# ...while anything inside the new system is transparently chrooted.
+target.execute("packages", "install", package_name="zfs")
+# -> chroot /mnt xbps-install -y zfs
 ```
+
+`for_target(root=...)` reads the chroot invocation from the profile's
+`chroot.exec_prefix`, so even that is not hardcoded. See the **Target
+Engines** section above.
 
 ## Debugging and Logging
 

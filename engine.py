@@ -119,6 +119,10 @@ class FreedomNASEngine:
             
             self.os_type = os_override or self._detect_os()
             self.profile_dir = Path(profile_dir or self._get_default_profile_dir())
+            self.root = None
+            self.chroot_prefix = None
+            self._target_mode = False
+            self._init_override = None
             self.profile, self.init_system = self._load_profile()
 
             self.__class__._initialized = True
@@ -127,6 +131,71 @@ class FreedomNASEngine:
                 f"(init: {self.init_system})"
             )
     
+    @classmethod
+    def for_target(
+        cls,
+        os_type: str,
+        root: Optional[str] = None,
+        profile_dir: Optional[str] = None,
+        init_system: Optional[str] = None,
+        chroot_prefix: Optional[str] = None,
+    ) -> "FreedomNASEngine":
+        """
+        Build a non-singleton engine bound to a *target* OS instead of the
+        running one.
+
+        The singleton returned by get_engine() always describes the machine
+        the process is running on — correct for the WebUI and the modules,
+        useless for an installer that provisions a different edition into a
+        chroot. This constructor bypasses the singleton entirely: the
+        returned engine loads `os_type`'s profile and, when `root` is given,
+        prefixes every command it executes with the chroot invocation taken
+        from the profile's `chroot.exec_prefix`.
+
+        Args:
+            os_type: Target edition ("debian", "freebsd", "void", ...)
+            root: Target root directory. None or "/" means "run on the host",
+                  which is what the in-place install mode wants.
+            profile_dir: Profiles directory (defaults to the usual search path)
+            init_system: Target init system. Defaults to the target profile's
+                         declared `init_system` — a target engine never probes
+                         the running host for it.
+            chroot_prefix: Override for the profile's `chroot.exec_prefix`
+
+        Returns:
+            FreedomNASEngine: a fresh instance, not the singleton
+
+        Raises:
+            OSNotSupportedException: If no profile exists for os_type
+            CommandTranslationError: If root is set but no chroot.exec_prefix
+                                     is available
+        """
+        engine = object.__new__(cls)
+        engine._initialized = True
+        engine._target_mode = True
+        engine._init_override = init_system
+        engine.os_type = os_type
+        engine.profile_dir = Path(profile_dir or engine._get_default_profile_dir())
+        engine.root = None if root in (None, "", "/") else root.rstrip("/")
+        engine.chroot_prefix = None
+        engine.profile, engine.init_system = engine._load_profile()
+
+        if engine.root is not None:
+            template = chroot_prefix or engine.profile.get("chroot", {}).get("exec_prefix")
+            if not template:
+                raise CommandTranslationError(
+                    f"No chroot.exec_prefix for '{os_type}' — cannot execute "
+                    f"commands against target root {engine.root}. Add it to "
+                    f"profiles/installer/installer-{os_type}.json."
+                )
+            engine.chroot_prefix = template.format(root=engine.root)
+
+        logger.info(
+            f"FreedomNAS Engine (target) initialized for {os_type} "
+            f"(init: {engine.init_system}, root: {engine.root or '/'})"
+        )
+        return engine
+
     def _detect_os(self) -> str:
         """
         Detect the running operating system.
@@ -336,8 +405,15 @@ class FreedomNASEngine:
 
         self._merge_module_profiles(profile)
 
-        # Detect init system (may read profile.get("init_system") as fallback)
-        init_system = self._detect_init_system()
+        # Detect init system (may read profile.get("init_system") as fallback).
+        # A target engine never probes the running host's filesystem — the
+        # target's own init system is whatever its profile declares.
+        if self._init_override:
+            init_system = self._init_override
+        elif self._target_mode:
+            init_system = profile.get("init_system", "systemd")
+        else:
+            init_system = self._detect_init_system()
 
         # Load and merge init profile
         init_profile = self._load_init_profile(init_system)
@@ -515,9 +591,12 @@ class FreedomNASEngine:
             )
 
         logger.debug(f"Executing command with stdin: {command}")
+        argv = shlex.split(command)
+        if self.chroot_prefix:
+            argv = shlex.split(self.chroot_prefix) + argv
         try:
             result = subprocess.run(
-                shlex.split(command),
+                argv,
                 input=stdin_data,
                 capture_output=True,
                 text=True,
@@ -565,6 +644,35 @@ class FreedomNASEngine:
                 f"Available keys in '{category}': {', '.join(available)}"
             )
 
+    def _resolve_invocation(
+        self,
+        command: str
+    ) -> Tuple[Union[str, List[str]], bool]:
+        """
+        Turn a formatted command string into the (argv, shell) pair to run.
+
+        Without a chroot prefix this is the historical behaviour: commands
+        containing shell metacharacters run via shell=True, everything else
+        via shlex.split + shell=False.
+
+        With a chroot prefix (a target engine, see for_target()) nothing ever
+        goes through shell=True — the prefix argv is prepended and a command
+        that needs a shell is handed to `sh -c` inside the chroot as a single
+        argument, so quoting inside the command can never escape into the
+        host's shell.
+        """
+        needs_shell = self._contains_shell_metachar(command)
+
+        if not self.chroot_prefix:
+            if needs_shell:
+                return command, True
+            return shlex.split(command), False
+
+        prefix = shlex.split(self.chroot_prefix)
+        if needs_shell:
+            return prefix + ["sh", "-c", command], False
+        return prefix + shlex.split(command), False
+
     def _run_safe(
         self,
         command: str,
@@ -592,21 +700,14 @@ class FreedomNASEngine:
             CommandExecutionError: If the command fails
         """
         try:
-            if self._contains_shell_metachar(command):
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-            else:
-                result = subprocess.run(
-                    shlex.split(command),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
+            argv, use_shell = self._resolve_invocation(command)
+            result = subprocess.run(
+                argv,
+                shell=use_shell,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
 
             if check and result.returncode != 0:
                 raise CommandExecutionError(

@@ -349,3 +349,95 @@ class TestSingleton:
     def test_get_engine_convenience(self):
         engine = get_engine(profile_dir=PROFILES_DIR)
         assert isinstance(engine, FreedomNASEngine)
+
+
+# ---------------------------------------------------------------------------
+# Target engines (installer)
+# ---------------------------------------------------------------------------
+
+class TestForTarget:
+    """FreedomNASEngine.for_target() — a non-singleton engine for another OS."""
+
+    def test_returns_a_fresh_instance(self):
+        singleton = make_engine("debian")
+        target = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+        assert target is not singleton
+
+    def test_loads_the_target_profile_not_the_hosts(self):
+        make_engine("debian")
+        target = FreedomNASEngine.for_target("freebsd", profile_dir=PROFILES_DIR)
+        assert target.os_type == "freebsd"
+        assert target.get_os_info()["os_name"] == "FreeBSD"
+
+    def test_init_system_comes_from_the_target_profile(self):
+        """A target engine must never probe the running host for its init."""
+        target = FreedomNASEngine.for_target("freebsd", profile_dir=PROFILES_DIR)
+        assert target.init_system == "bsd_rc"
+        assert "sysrc" in target.get_command("services", "enable", service_name="sshd")
+
+    def test_init_system_can_be_overridden(self):
+        target = FreedomNASEngine.for_target(
+            "debian", profile_dir=PROFILES_DIR, init_system="openrc"
+        )
+        assert target.init_system == "openrc"
+
+    def test_no_root_means_no_chroot_prefix(self):
+        target = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+        assert target.chroot_prefix is None
+        argv, use_shell = target._resolve_invocation("apt-get update")
+        assert argv == ["apt-get", "update"]
+        assert use_shell is False
+
+    def test_root_slash_is_treated_as_no_chroot(self):
+        target = FreedomNASEngine.for_target("debian", root="/", profile_dir=PROFILES_DIR)
+        assert target.root is None
+        assert target.chroot_prefix is None
+
+    def test_root_prefixes_every_command(self):
+        target = FreedomNASEngine.for_target("debian", root="/mnt", profile_dir=PROFILES_DIR)
+        assert target.chroot_prefix == "chroot /mnt"
+        argv, use_shell = target._resolve_invocation("apt-get update")
+        assert argv == ["chroot", "/mnt", "apt-get", "update"]
+        assert use_shell is False
+
+    def test_shell_commands_are_wrapped_not_shelled_out(self):
+        """
+        A command needing a shell runs `sh -c` *inside* the chroot, as a single
+        argument — never through the host's shell, where its quoting could
+        escape.
+        """
+        target = FreedomNASEngine.for_target("debian", root="/mnt", profile_dir=PROFILES_DIR)
+        argv, use_shell = target._resolve_invocation("echo 'a:b' | chpasswd")
+        assert argv == ["chroot", "/mnt", "sh", "-c", "echo 'a:b' | chpasswd"]
+        assert use_shell is False
+
+    def test_trailing_slash_is_stripped(self):
+        target = FreedomNASEngine.for_target("debian", root="/mnt/", profile_dir=PROFILES_DIR)
+        assert target.chroot_prefix == "chroot /mnt"
+
+    def test_chroot_prefix_can_be_overridden(self):
+        target = FreedomNASEngine.for_target(
+            "debian", root="/mnt", profile_dir=PROFILES_DIR,
+            chroot_prefix="systemd-nspawn -D {root}",
+        )
+        assert target.chroot_prefix == "systemd-nspawn -D /mnt"
+
+    def test_host_singleton_is_untouched_by_a_target_engine(self):
+        host = make_engine("debian")
+        FreedomNASEngine.for_target("freebsd", root="/mnt", profile_dir=PROFILES_DIR)
+        assert host.chroot_prefix is None
+        assert host.os_type == "debian"
+        assert get_engine(profile_dir=PROFILES_DIR) is host
+
+    def test_unknown_target_raises(self):
+        with pytest.raises(OSNotSupportedException):
+            FreedomNASEngine.for_target("plan9", profile_dir=PROFILES_DIR)
+
+    def test_installer_fragment_is_merged(self):
+        """profiles/installer/ is picked up by the ordinary fragment scan."""
+        target = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+        assert "partitioning" in target.profile
+        assert "rootpool" in target.profile
+        assert target.get_command(
+            "partitioning", "create_esp", disk="/dev/sda", esp_size="512MiB"
+        ) == "sgdisk -n 1:0:+512MiB -t 1:EF00 /dev/sda"
