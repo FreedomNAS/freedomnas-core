@@ -103,6 +103,42 @@ class TestOSDetection:
             engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
         assert engine.os_type == "arch"
 
+    def test_detects_gentoo(self):
+        with patch("builtins.open", side_effect=os_release_open('ID=gentoo\nNAME="Gentoo"')), \
+             patch("platform.system", return_value="Linux"):
+            engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
+        assert engine.os_type == "gentoo"
+
+    def test_detects_void(self):
+        with patch("builtins.open", side_effect=os_release_open('ID=void\nNAME="void"')), \
+             patch("platform.system", return_value="Linux"):
+            engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
+        assert engine.os_type == "void"
+
+    def test_detects_artix_not_arch(self):
+        """
+        Artix declares ID_LIKE=arch but has its own profile (OpenRC, not
+        systemd). The exact ID has to win, or it silently gets Arch's.
+        """
+        with patch("builtins.open", side_effect=os_release_open(
+                'ID=artix\nID_LIKE=arch\nNAME="Artix Linux"')), \
+             patch("platform.system", return_value="Linux"):
+            engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
+        assert engine.os_type == "artix"
+
+    def test_unknown_derivative_falls_back_to_id_like(self):
+        with patch("builtins.open", side_effect=os_release_open(
+                'ID=linuxmint\nID_LIKE="ubuntu debian"')), \
+             patch("platform.system", return_value="Linux"):
+            engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
+        assert engine.os_type == "debian"
+
+    def test_quoted_id_is_unquoted(self):
+        with patch("builtins.open", side_effect=os_release_open("ID='gentoo'")), \
+             patch("platform.system", return_value="Linux"):
+            engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
+        assert engine.os_type == "gentoo"
+
     def test_detects_freebsd(self):
         with patch("platform.system", return_value="FreeBSD"):
             engine = FreedomNASEngine(profile_dir=PROFILES_DIR)
@@ -465,6 +501,21 @@ class TestForTarget:
         assert host.chroot_prefix is None
         assert host.os_type == "debian"
         assert get_engine(profile_dir=PROFILES_DIR) is host
+
+    def test_gentoo_target_uses_openrc_and_portage(self):
+        target = FreedomNASEngine.for_target("gentoo", root="/mnt", profile_dir=PROFILES_DIR)
+        assert target.init_system == "openrc"
+        assert target.get_command("services", "enable", service_name="sshd") == (
+            "rc-update add sshd default"
+        )
+        assert target.get_command("packages", "install", package_name="sys-fs/zfs") == (
+            "emerge --quiet --noreplace sys-fs/zfs"
+        )
+        argv, use_shell = target._resolve_invocation(
+            target.get_command("packages", "install", package_name="sys-fs/zfs")
+        )
+        assert argv[:2] == ["chroot", "/mnt"]
+        assert use_shell is False
 
     def test_unknown_target_raises(self):
         with pytest.raises(OSNotSupportedException):

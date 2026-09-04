@@ -67,7 +67,21 @@ class FreedomNASEngine:
     """
     
     # Supported OS families
-    SUPPORTED_OS = ["debian", "freebsd", "arch"]
+    SUPPORTED_OS = ["debian", "freebsd", "arch", "artix", "void", "gentoo"]
+
+    # /etc/os-release ID (or ID_LIKE) -> profile name. Several ids can map to
+    # one profile when a derivative is close enough to reuse it wholesale.
+    _DISTRO_IDS = {
+        "debian": "debian",
+        "ubuntu": "debian",
+        "arch": "arch",
+        "artix": "artix",
+        "void": "void",
+        "gentoo": "gentoo",
+    }
+
+    # Recognised but deliberately refused, so the error can say why.
+    _KNOWN_UNSUPPORTED = ("fedora", "rhel", "centos", "rocky", "almalinux")
 
     # Profile subdirectories that are never treated as module fragments:
     # "os" holds shared OS-level metadata, "init" holds per-init-system service
@@ -207,44 +221,76 @@ class FreedomNASEngine:
             OSNotSupportedException: If the OS is not supported
         """
         system = platform.system()
-        
+
         if system == "Linux":
-            # Try to detect specific Linux distribution
             try:
                 with open("/etc/os-release") as f:
-                    content = f.read().lower()
-                    
-                if "debian" in content:
-                    return "debian"
-                elif "ubuntu" in content:
-                    # Ubuntu is based on Debian, use the same profile
-                    logger.warning("Ubuntu detected, using Debian profile")
-                    return "debian"
-                elif "arch" in content:
-                    return "arch"
-                elif "fedora" in content or "rhel" in content or "centos" in content:
-                    raise OSNotSupportedException(
-                        "RHEL-based systems not yet supported. "
-                        "Please use Debian or FreeBSD Edition."
-                    )
-                else:
-                    raise OSNotSupportedException(
-                        f"Unknown Linux distribution. "
-                        f"Please use Debian-based or FreeBSD Edition."
-                    )
+                    content = f.read()
             except FileNotFoundError:
                 raise OSNotSupportedException(
                     "/etc/os-release not found. Cannot detect Linux distribution."
                 )
-        
+
+            fields = self._parse_os_release(content)
+            distro_id = fields.get("id", "")
+
+            # Exact ID first: a derivative that has its own profile (Artix)
+            # must never fall through to its parent (Arch) via ID_LIKE.
+            if distro_id in self._DISTRO_IDS:
+                profile = self._DISTRO_IDS[distro_id]
+                if profile != distro_id:
+                    logger.warning(
+                        f"{distro_id} detected, using the {profile} profile"
+                    )
+                return profile
+
+            # Then the declared parent, for a derivative we don't know about.
+            for parent in fields.get("id_like", "").split():
+                if parent in self._DISTRO_IDS:
+                    profile = self._DISTRO_IDS[parent]
+                    logger.warning(
+                        f"Unknown distribution '{distro_id}', using the "
+                        f"{profile} profile it declares itself compatible with"
+                    )
+                    return profile
+
+            if distro_id in self._KNOWN_UNSUPPORTED:
+                raise OSNotSupportedException(
+                    "RHEL-based systems not yet supported. "
+                    "Please use Debian or FreeBSD Edition."
+                )
+            raise OSNotSupportedException(
+                f"Unknown Linux distribution '{distro_id or content[:40]}'. "
+                f"Supported: {', '.join(sorted(self._DISTRO_IDS))}."
+            )
+
         elif system == "FreeBSD":
             return "freebsd"
-        
+
         else:
             raise OSNotSupportedException(
                 f"Operating system '{system}' is not supported by FreedomNAS. "
-                f"Supported systems: Linux (Debian), FreeBSD"
+                f"Supported systems: Linux, FreeBSD"
             )
+
+    @staticmethod
+    def _parse_os_release(content: str) -> Dict[str, str]:
+        """
+        Parse /etc/os-release into a lowercased key -> value dict.
+
+        Matching on the ID field rather than searching the whole file for a
+        substring matters once several editions are supported: Ubuntu's file
+        mentions Debian, Artix's may declare ID_LIKE=arch, and a substring
+        search would hand either of them the wrong profile.
+        """
+        fields = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            fields[key.strip().lower()] = value.strip().strip('"\'').lower()
+        return fields
     
     def _get_default_profile_dir(self) -> str:
         """
