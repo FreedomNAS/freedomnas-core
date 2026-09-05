@@ -6,8 +6,13 @@ pkgdesc="FreedomNAS Core Engine — OS-agnostic storage appliance"
 arch=('any')
 url="https://codeberg.org/freedomnas/freedomnas-core"
 license=('MPL-2.0')
-depends=('python' 'python-pip' 'zfs')
-makedepends=('python-setuptools')
+depends=(
+    'freedomnas-profiles'
+    'python'
+    'python-yaml'
+    'python-cryptography'
+)
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 optdepends=(
     'zfs: ZFS support (highly recommended)'
     'zfs-dkms: ZFS kernel module on non-LTS kernels'
@@ -18,17 +23,16 @@ install=freedomnas-core.install
 
 build() {
     cd "${srcdir}/${pkgname}"
-    python setup.py build
+    python -m build --wheel --no-isolation
 }
 
 package() {
     cd "${srcdir}/${pkgname}"
-    python setup.py install --root="${pkgdir}/" --optimize=1 --skip-build
+    python -m installer --destdir="${pkgdir}" dist/*.whl
 
-    # Install profiles to /usr/lib/freedomnas/profiles
-    mkdir -p "${pkgdir}/usr/lib/freedomnas"
-    cp -r ../freedomnas-profiles "${pkgdir}/usr/lib/freedomnas/profiles"
+    # The OS profiles are their own package (freedomnas-profiles) and are
+    # installed to /usr/lib/freedomnas/profiles by it, not duplicated here.
 
-    # Install license
-    install -Dm 644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    [ -f LICENSE ] && install -Dm 644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm 644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
 }

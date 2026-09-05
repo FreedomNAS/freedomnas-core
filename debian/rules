@@ -10,11 +10,6 @@ override_dh_python3:
 	dh_python3
 	dh_python3 -p freedomnas-core --shebang=/usr/bin/python3
 
-override_dh_install:
-	dh_install
-	mkdir -p debian/freedomnas-core/usr/lib/freedomnas
-	cp -r freedomnas-profiles debian/freedomnas-core/usr/lib/freedomnas/profiles
-
 override_dh_auto_test:
 	# Run tests if available
 	-python3 -m pytest tests/ -v 2>/dev/null || true
