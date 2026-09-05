@@ -1,3 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freedomnas-core"
+version = "4.0.0"
+description = "FreedomNAS core engine — OS abstraction, config, reconciler"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MPL-2.0"
+authors = [{ name = "FreedomNAS Team", email = "dev@freedomnas.io" }]
+dependencies = [
+    "PyYAML>=6.0",
+    "cryptography>=41.0",
+]
+
+[project.urls]
+Homepage = "https://codeberg.org/FreedomNAS/freedomnas-core"
+
+[project.scripts]
+freedomnas = "freedomnas.__main__:main"
+
+# The modules live in the repository root but are imported as the `freedomnas`
+# package (see __init__.py), so the package maps to "." rather than to a
+# subdirectory. Subpackages are listed explicitly: an automatic scan would
+# sweep in tests/, debian/ and the packaging files.
+[tool.setuptools]
+package-dir = { "freedomnas" = "." }
+packages = [
+    "freedomnas",
+    "freedomnas.modules",
+    "freedomnas.modules.network",
+    "freedomnas.modules.shares",
+    "freedomnas.modules.storage",
+    "freedomnas.modules.updates",
+    "freedomnas.modules.users",
+]
+
+[tool.setuptools.package-data]
+"*" = ["manifest.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
