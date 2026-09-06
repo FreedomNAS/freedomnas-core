@@ -222,7 +222,7 @@ config.save()  # Saves atomically
 ```
 
 The configuration is stored in:
-1. ZFS dataset: `/mnt/zpool/.freedomnas/config.yaml` (primary)
+1. ZFS dataset: `/etc/freedomnas/state/config.yaml` (primary — where `rpool/.freedomnas` mounts)
 2. Backup: `/etc/freedomnas/config.yaml` (fallback)
 
 ## Security

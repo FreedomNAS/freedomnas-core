@@ -327,3 +327,43 @@ class TestDotNotationAccessors:
         d = cfg.to_dict()
         d["system"]["hostname"] = "mutated"
         assert cfg.get_hostname() == "freedomnas"
+
+
+class TestConfigPathDiscovery:
+    """
+    Where the configuration lives. The `.freedomnas` dataset is mounted at
+    /etc/freedomnas/state, so that is where the installer, the images and the
+    reconciler all read and write; a mismatch here makes the reconciler
+    silently apply defaults over a perfectly good configuration.
+    """
+
+    def test_default_path_matches_the_mounted_dataset(self):
+        assert str(ConfigurationManager.DEFAULT_CONFIG_PATH) == (
+            "/etc/freedomnas/state/config.yaml"
+        )
+
+    def test_backup_path_is_the_local_fallback(self):
+        assert str(ConfigurationManager.BACKUP_CONFIG_PATH) == (
+            "/etc/freedomnas/config.yaml"
+        )
+
+    def test_finds_the_dataset_copy_first(self, tmp_path, monkeypatch):
+        primary = tmp_path / "state" / "config.yaml"
+        backup = tmp_path / "etc" / "config.yaml"
+        for path in (primary, backup):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("system:\n  hostname: fromdisk\n")
+
+        monkeypatch.setattr(ConfigurationManager, "DEFAULT_CONFIG_PATH", primary)
+        monkeypatch.setattr(ConfigurationManager, "BACKUP_CONFIG_PATH", backup)
+        assert ConfigurationManager()._find_config_path() == primary
+
+    def test_falls_back_to_the_local_copy(self, tmp_path, monkeypatch):
+        primary = tmp_path / "state" / "config.yaml"
+        backup = tmp_path / "etc" / "config.yaml"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text("system:\n  hostname: fromdisk\n")
+
+        monkeypatch.setattr(ConfigurationManager, "DEFAULT_CONFIG_PATH", primary)
+        monkeypatch.setattr(ConfigurationManager, "BACKUP_CONFIG_PATH", backup)
+        assert ConfigurationManager()._find_config_path() == backup

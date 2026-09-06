@@ -26,7 +26,7 @@ class ConfigurationManager:
     Manages FreedomNAS system configuration stored in YAML format.
     
     The configuration is stored in a ZFS dataset (.freedomnas) at:
-    /mnt/zpool/.freedomnas/config.yaml
+    /etc/freedomnas/state/config.yaml
     
     This allows:
     - Configuration persistence across OS reinstallation
@@ -34,7 +34,7 @@ class ConfigurationManager:
     - Automated recovery of system state
     """
     
-    DEFAULT_CONFIG_PATH = Path("/mnt/zpool/.freedomnas/config.yaml")
+    DEFAULT_CONFIG_PATH = Path("/etc/freedomnas/state/config.yaml")
     BACKUP_CONFIG_PATH = Path("/etc/freedomnas/config.yaml")
     
     # Default configuration template
