@@ -508,8 +508,21 @@ class ReconciliationEngine:
 
     def _do_nfs_share_delete(self, share_name: str) -> ActionResult:
         params = {"name": share_name}
+
+        # /etc/exports has no notion of a share name: a line is identified by
+        # its path, so look it up the way the WebUI's delete route does.
+        share = next(
+            (s for s in self.config.get_nfs_shares() if s.get("name") == share_name),
+            None,
+        )
+        if share is None or not share.get("path"):
+            return ActionResult(
+                action="nfs.export_remove", params=params, target_state="skipped",
+                error=f"No path recorded for NFS share '{share_name}'",
+            )
+
         try:
-            self.engine.execute("nfs", "export_remove", name=share_name)
+            self.engine.execute("nfs", "export_remove", path=share["path"])
             self.engine.execute("nfs", "exportfs_reload")
             logger.info("Deleted NFS share: %s", share_name)
             return ActionResult(action="nfs.export_remove", params=params, target_state="applied")
