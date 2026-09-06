@@ -25,6 +25,10 @@ EDITIONS = ["debian", "freebsd", "arch", "artix", "void", "gentoo"]
 # Only consulted on FreeBSD (api/routes/network.py branches on os_family).
 BSD_ONLY = {("network", "list_interfaces_json")}
 
+# Looked up inside a try/except: an edition declares one only when it needs
+# to correct the tool being configured, and its absence is the normal case.
+OPTIONAL = {("updates", "topgrade_extra_config")}
+
 
 def _merged_profile(edition: str) -> dict:
     """Assemble a profile the way engine._load_profile() does."""
@@ -80,6 +84,8 @@ def test_every_engine_call_exists_in_the_profile(edition):
     missing = []
     for (category, action), origins in sorted(_engine_calls().items()):
         if (category, action) in BSD_ONLY and edition != "freebsd":
+            continue
+        if (category, action) in OPTIONAL:
             continue
         if action not in profile.get(category, {}):
             missing.append(f"{category}.{action} (called from {', '.join(sorted(origins))})")
