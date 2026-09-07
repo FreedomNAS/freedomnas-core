@@ -347,7 +347,9 @@ class PoolUnlocker:
         keyfile = _write_transient_keyfile(pool_name, raw_key)
         try:
             self.engine.execute("zfs", "load_key_file", pool_name=pool_name, keyfile_path=str(keyfile))
-            self.engine.execute("zfs", "mount_all", check=False)
+            # Only this pool's datasets: `zfs mount -a` would also mount every
+            # other imported pool, including one belonging to another system.
+            self.engine.execute("zfs", "mount_pool", pool_name=pool_name, check=False)
             logger.info("Unlocked ZFS pool: %s", pool_name)
             return True
         except (CommandExecutionError, CommandTranslationError) as exc:
