@@ -25,6 +25,19 @@ from typing import Union, List, Dict, Any, Tuple, Optional
 logger = logging.getLogger("FreedomNAS.Core")
 
 
+def _last_lines(text: str, count: int = 12) -> str:
+    """
+    The tail of a failed command's output, for the exception message.
+
+    A package manager writes hundreds of lines and puts the reason it gave up
+    in the last few; the whole thing goes to the log, this goes to the human.
+    """
+    lines = text.strip().splitlines()
+    if len(lines) <= count:
+        return "\n".join(lines)
+    return "\n".join(["[...]"] + lines[-count:])
+
+
 class FreedomNASEngineException(Exception):
     """Base exception for FreedomNAS engine errors"""
     pass
@@ -761,10 +774,15 @@ class FreedomNASEngine:
             )
 
             if check and result.returncode != 0:
+                logger.error(
+                    "Command failed with exit code %s: %s\nstdout:\n%s\nstderr:\n%s",
+                    result.returncode, command, result.stdout, result.stderr,
+                )
                 raise CommandExecutionError(
                     f"Command failed with exit code {result.returncode}\n"
                     f"Command: {command}\n"
-                    f"Stderr: {result.stderr}"
+                    f"Stdout: {_last_lines(result.stdout)}\n"
+                    f"Stderr: {_last_lines(result.stderr)}"
                 )
 
             return result.stdout.strip(), result.stderr.strip()
