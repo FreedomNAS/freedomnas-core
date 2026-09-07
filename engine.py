@@ -734,6 +734,10 @@ class FreedomNASEngine:
         sanitized by _sanitize_kwargs before they reach this method, limiting
         injection risk to the JSON profile author.
 
+        Standard input is /dev/null, never the caller's terminal: a command
+        that tries to prompt gets EOF and fails instead of blocking forever
+        on a question nobody can see.
+
         Args:
             command: Fully-formatted command string to execute
             timeout: Timeout in seconds
@@ -752,6 +756,7 @@ class FreedomNASEngine:
                 shell=use_shell,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
                 timeout=timeout,
             )
 
