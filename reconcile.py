@@ -366,9 +366,22 @@ class ReconciliationEngine:
     # Internal — atomic engine calls: ZFS
     # ------------------------------------------------------------------
 
+    def _pool_is_imported(self, pool_name: str) -> bool:
+        """A pool that is already imported is not an error to reconcile."""
+        try:
+            stdout, _ = self.engine.execute("zfs", "pool_list", check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            return False
+        return any(line.split()[:1] == [pool_name] for line in stdout.splitlines() if line.split())
+
     def _do_pool_import(self, pool: dict) -> ActionResult:
         pool_name = pool.get("name", "")
         params = {"pool_name": pool_name}
+        if self._pool_is_imported(pool_name):
+            return ActionResult(
+                action="zfs.pool_import", params=params,
+                target_state="skipped", error="already imported",
+            )
         try:
             self.engine.execute("zfs", "pool_import", pool_name=pool_name)
             logger.info("Imported ZFS pool: %s", pool_name)
@@ -381,10 +394,25 @@ class ReconciliationEngine:
     # Internal — atomic engine calls: users
     # ------------------------------------------------------------------
 
+    def _user_exists(self, username: str) -> bool:
+        """The root pool's config describes users that a reinstall may already have."""
+        try:
+            stdout, _ = self.engine.execute(
+                "users", "get_user_info", username=username, check=False
+            )
+        except (CommandExecutionError, CommandTranslationError):
+            return False
+        return bool(stdout.strip())
+
     def _do_user_create(self, user: dict) -> ActionResult:
         username = user.get("username", "")
         groups = ",".join(user.get("groups", []))
         params = {"username": username, "groups": groups}
+        if self._user_exists(username):
+            return ActionResult(
+                action="users.create", params=params,
+                target_state="skipped", error="user already exists",
+            )
         try:
             self.engine.execute(
                 "users", "create",
