@@ -11,15 +11,26 @@ is that comparison.
 
 import ast
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
 
 REPOS = Path(__file__).resolve().parent.parent.parent
 PROFILES = REPOS / "freedomnas-profiles"
-SOURCES = [REPOS / "freedomnas-core", REPOS / "freedomnas-webui"]
+SOURCES = [
+    REPOS / "freedomnas-core",
+    REPOS / "freedomnas-webui",
+    REPOS / "freedomnas-installer",
+]
 
-ENGINE_METHODS = {"execute", "get_command", "execute_with_stdin", "get_profile_value"}
+# The installer reaches the engine through its own ExecutionContext, which is
+# why `host_run`/`target_run`/`stage_run` belong here: they resolve the same
+# (category, action) pairs against the same profiles.
+ENGINE_METHODS = {
+    "execute", "get_command", "execute_with_stdin", "get_profile_value",
+    "host_run", "target_run", "stage_run", "target_run_stdin", "has",
+}
 EDITIONS = ["debian", "freebsd", "arch", "artix", "void", "gentoo"]
 
 # Only consulted on FreeBSD (api/routes/network.py branches on os_family).
@@ -46,6 +57,10 @@ def _merged_profile(edition: str) -> dict:
     return profile
 
 
+guarded: set = set()
+
+
+@lru_cache(maxsize=None)
 def _engine_calls() -> dict:
     """Every (category, action) pair reached through the engine, with origins."""
     calls: dict = {}
@@ -68,8 +83,23 @@ def _engine_calls() -> dict:
                 ]
                 if len(literals) >= 2:
                     key = (literals[0], literals[1])
-                    calls.setdefault(key, set()).add(f"{source.name}:{node.lineno}")
+                    if node.func.attr == "has":
+                        guarded.add(key)
+                    else:
+                        calls.setdefault(key, set()).add(f"{source.name}:{node.lineno}")
     return calls
+
+
+def _guarded_pairs() -> set:
+    """
+    Pairs the code asks `has()` about before calling.
+
+    An action behind that question is optional by construction — the edition
+    that lacks it takes the other branch — so it is not a coverage failure.
+    Deriving it from the code beats a hand-kept list, which goes stale.
+    """
+    _engine_calls()
+    return guarded
 
 
 pytestmark = pytest.mark.skipif(
@@ -85,7 +115,7 @@ def test_every_engine_call_exists_in_the_profile(edition):
     for (category, action), origins in sorted(_engine_calls().items()):
         if (category, action) in BSD_ONLY and edition != "freebsd":
             continue
-        if (category, action) in OPTIONAL:
+        if (category, action) in OPTIONAL or (category, action) in _guarded_pairs():
             continue
         if action not in profile.get(category, {}):
             missing.append(f"{category}.{action} (called from {', '.join(sorted(origins))})")
@@ -101,3 +131,20 @@ def test_the_scan_actually_finds_calls():
     calls = _engine_calls()
     assert len(calls) > 30, f"only {len(calls)} engine calls found — is the scan working?"
     assert ("system", "hostname_set") in calls
+    assert ("chroot", "mount") in calls, "the installer's own calls are not being scanned"
+
+
+@pytest.mark.parametrize("edition", EDITIONS)
+def test_every_edition_installs_a_boot_chain(edition):
+    """
+    Arch shipped an empty `bootloader` section: every branch in
+    bootloader_installer.py is behind a `has()`, so the installer completed
+    without writing anything to the ESP and the machine could not boot.
+    Nothing else here would notice, because "optional everywhere" is exactly
+    what the coverage test above is told to ignore.
+    """
+    bootloader = _merged_profile(edition).get("bootloader", {})
+    assert "build_uki" in bootloader or "install_efi_loader" in bootloader, (
+        f"os-{edition}.json declares no way to install a boot chain: "
+        f"the installer would finish leaving the ESP empty"
+    )
