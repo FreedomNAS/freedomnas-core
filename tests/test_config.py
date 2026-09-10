@@ -183,8 +183,8 @@ class TestSystemHelpers:
         assert cfg.get_edition() == "debian"
 
     def test_set_root_filesystem_valid(self, cfg):
-        cfg.set_root_filesystem("btrfs")
-        assert cfg.get_root_filesystem() == "btrfs"
+        cfg.set_root_filesystem("zfs")
+        assert cfg.get_root_filesystem() == "zfs"
 
     def test_set_root_filesystem_invalid(self, cfg):
         with pytest.raises(ConfigurationException):

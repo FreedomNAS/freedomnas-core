@@ -128,6 +128,24 @@ def cmd_unlock_pools(args) -> int:
     return 0
 
 
+def cmd_ensure_tls(args) -> int:
+    try:
+        from freedomnas import tls
+    except ImportError:
+        import tls  # type: ignore
+
+    try:
+        created = tls.ensure_certificate(args.hostname)
+    except Exception as exc:
+        print(f"ERROR: could not create the TLS certificate: {exc}", file=sys.stderr)
+        return 1
+
+    if created:
+        print(f"Created a self-signed certificate at {tls.CERT_FILE}")
+    print(f"Certificate fingerprint (SHA-256): {tls.fingerprint()}")
+    return 0
+
+
 def cmd_reconcile(args) -> int:
     try:
         from freedomnas.engine import get_engine
@@ -247,6 +265,14 @@ def main() -> int:
         default=None,
         help="Path to a desired-state YAML file (default: use the config.yaml shadow copy)",
     )
+    tls_parser = sub.add_parser(
+        "ensure-tls",
+        help="Create the WebUI's self-signed certificate if it is not there yet",
+    )
+    tls_parser.add_argument(
+        "--hostname", default="",
+        help="Name to put in the certificate (default: the system hostname)",
+    )
     sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
     sub.add_parser("version", help="Print package version")
 
@@ -257,6 +283,7 @@ def main() -> int:
         "check":        cmd_check,
         "unlock-pools": cmd_unlock_pools,
         "reconcile":    cmd_reconcile,
+        "ensure-tls":   cmd_ensure_tls,
         "serve":        cmd_serve,
         "version":      cmd_version,
     }

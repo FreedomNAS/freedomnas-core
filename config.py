@@ -47,7 +47,7 @@ class ConfigurationManager:
             "initialized_at": None,
             "initialized_by": None,  # "installer" or "webui"
             "edition": None,  # "debian" or "freebsd"
-            "root_filesystem": None,  # "btrfs" (Linux) or "zfs" (FreeBSD)
+            "root_filesystem": None,  # "zfs"
         },
         "network": {
             "interfaces": [],
@@ -348,20 +348,23 @@ class ConfigurationManager:
         return self.config["system"].get("edition")
     
     def get_root_filesystem(self) -> Optional[str]:
-        """Get the root filesystem type (btrfs or zfs)"""
+        """Get the root filesystem type"""
         return self.config["system"].get("root_filesystem")
     
     def set_root_filesystem(self, fs_type: str) -> None:
         """
         Set the root filesystem type.
-        
+
+        ZFS is the only one FreedomNAS implements: the btrfs commands the
+        profiles used to carry were never reached by any code path, and
+        accepting the value here promised a backend that does not exist.
+
         Args:
-            fs_type: "btrfs" for Linux, "zfs" for FreeBSD
+            fs_type: "zfs"
         """
-        if fs_type not in ["btrfs", "zfs"]:
+        if fs_type != "zfs":
             raise ConfigurationException(
-                f"Invalid root filesystem type: {fs_type}. "
-                f"Must be 'btrfs' or 'zfs'"
+                f"Invalid root filesystem type: {fs_type}. Must be 'zfs'"
             )
         self.config["system"]["root_filesystem"] = fs_type
         self.save()
