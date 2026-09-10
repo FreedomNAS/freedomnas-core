@@ -410,6 +410,17 @@ class PoolProvisioner:
         for device in usb_devices or []:
             self._write_usb_key(device, usb_key_bytes)
 
+        # A data pool holds the appliance's configuration too: when the disk
+        # with the root pool dies, this is what a reinstall finds waiting.
+        try:
+            from freedomnas import shadow
+        except ImportError:
+            import shadow  # type: ignore
+        try:
+            shadow.ensure_dataset(self.engine, pool_name)
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.warning("Could not create the shadow dataset on %s: %s", pool_name, exc)
+
     def _write_usb_key(self, device: str, key_bytes: bytes) -> None:
         USB_MOUNTPOINT.mkdir(parents=True, exist_ok=True)
         USB_MOUNTPOINT.chmod(0o700)

@@ -161,6 +161,38 @@ def cmd_snapshot_run(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_shadow_sync(_args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas.config import ConfigurationManager
+        from freedomnas import shadow
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        from config import ConfigurationManager  # type: ignore
+        import shadow  # type: ignore
+
+    try:
+        engine = get_engine()
+        config = ConfigurationManager()
+    except Exception as exc:
+        print(f"ERROR: could not initialise: {exc}", file=sys.stderr)
+        return 1
+
+    results = shadow.sync(engine, str(config.config_path))
+    if not results:
+        print("No other pool carries a .freedomnas dataset — nothing to mirror.")
+        return 0
+
+    failed = 0
+    for r in results:
+        if r["copied"]:
+            print(f"OK    {r['dataset']}")
+        else:
+            failed += 1
+            print(f"FAIL  {r['dataset']}: {r['error']}", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def cmd_ensure_tls(args) -> int:
     try:
         from freedomnas import tls
@@ -309,6 +341,11 @@ def main() -> int:
         help="Which retention interval to apply",
     )
 
+    sub.add_parser(
+        "shadow-sync",
+        help="Mirror the configuration onto every other pool's .freedomnas dataset",
+    )
+
     tls_parser = sub.add_parser(
         "ensure-tls",
         help="Create the WebUI's self-signed certificate if it is not there yet",
@@ -329,6 +366,7 @@ def main() -> int:
         "reconcile":    cmd_reconcile,
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
+        "shadow-sync":  cmd_shadow_sync,
         "serve":        cmd_serve,
         "version":      cmd_version,
     }
