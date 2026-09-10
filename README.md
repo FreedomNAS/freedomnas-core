@@ -195,7 +195,7 @@ Each distribution has its own JSON profile with the command mapping:
 - **media**: Removable-device list/mount/unmount, used by `keymgmt.py`'s USB zero-touch unlock
 - **samba**: SMB/CIFS configuration
 - **nfs**: NFS configuration
-- **btrfs**: Btrfs filesystem operations (Debian profile only — not a supported root filesystem, see `DEVELOPER_GUIDE.md`'s ZFS Best Practices)
+- **zfs_properties**: the ZFS properties each edition supports — a catalogue, not commands
 - **system**: System information and configuration
 
 ## Configuration Management
