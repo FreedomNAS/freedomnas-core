@@ -703,6 +703,17 @@ class FreedomNASEngine:
                 f"Available keys in '{category}': {', '.join(available)}"
             )
 
+    def get_profile_section(self, category: str) -> Dict[str, Any]:
+        """
+        A whole data section of the profile, copied.
+
+        `get_profile_value` answers for one key; some sections are catalogues
+        rather than single values — `zfs_properties` describes every tunable
+        the edition supports — and the caller wants all of it.
+        """
+        section = self.profile.get(category, {})
+        return dict(section) if isinstance(section, dict) else {}
+
     def _resolve_invocation(
         self,
         command: str
