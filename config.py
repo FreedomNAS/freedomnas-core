@@ -65,6 +65,7 @@ class ConfigurationManager:
         "snapshots": {
             "root": [],  # Root filesystem snapshots
             "boot": [],  # Boot snapshots (FreeBSD)
+            "policies": [],  # {dataset, hourly, daily, weekly, monthly}
         },
         "updates": {
             "topgrade": {
@@ -519,6 +520,51 @@ class ConfigurationManager:
         """Get all root filesystem snapshots"""
         return self.config.get("snapshots", {}).get("root", [])
     
+    # ------------------------------------------------------------------
+    # Scheduled snapshots
+    # ------------------------------------------------------------------
+
+    SNAPSHOT_INTERVALS = ("hourly", "daily", "weekly", "monthly")
+
+    def get_snapshot_policies(self) -> List[Dict[str, Any]]:
+        """Every dataset with a retention policy, and how many to keep."""
+        return self.config.get("snapshots", {}).get("policies", [])
+
+    def set_snapshot_policy(self, dataset: str, keep: Dict[str, int]) -> None:
+        """
+        Set how many snapshots of each interval to keep for one dataset.
+
+        An interval left out, or set to zero, means "do not take these" — the
+        scheduler only ever prunes what it created itself, so turning one off
+        never touches snapshots taken by hand.
+        """
+        if not dataset:
+            raise ConfigurationException("Snapshot policy must name a dataset")
+
+        cleaned = {}
+        for interval in self.SNAPSHOT_INTERVALS:
+            count = keep.get(interval, 0)
+            if not isinstance(count, int) or count < 0:
+                raise ConfigurationException(
+                    f"Invalid count for {interval}: {count!r} (expected a non-negative integer)"
+                )
+            cleaned[interval] = count
+
+        policies = [p for p in self.get_snapshot_policies() if p.get("dataset") != dataset]
+        policies.append({"dataset": dataset, **cleaned})
+        self.config.setdefault("snapshots", {})["policies"] = policies
+        self.save()
+
+    def remove_snapshot_policy(self, dataset: str) -> bool:
+        """Stop taking scheduled snapshots of a dataset. Existing ones stay."""
+        policies = self.get_snapshot_policies()
+        remaining = [p for p in policies if p.get("dataset") != dataset]
+        if len(remaining) == len(policies):
+            return False
+        self.config.setdefault("snapshots", {})["policies"] = remaining
+        self.save()
+        return True
+
     def get_boot_pool(self) -> Optional[str]:
         """Get the boot pool name (FreeBSD only)"""
         return self.config["storage"].get("boot_pool")

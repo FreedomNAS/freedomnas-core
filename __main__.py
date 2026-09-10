@@ -128,6 +128,39 @@ def cmd_unlock_pools(args) -> int:
     return 0
 
 
+def cmd_snapshot_run(args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas.config import ConfigurationManager
+        from freedomnas.snapshots import SnapshotScheduler
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        from config import ConfigurationManager  # type: ignore
+        from snapshots import SnapshotScheduler  # type: ignore
+
+    try:
+        engine = get_engine()
+        config = ConfigurationManager()
+    except Exception as exc:
+        print(f"ERROR: could not initialise: {exc}", file=sys.stderr)
+        return 1
+
+    results = SnapshotScheduler(engine, config).run(args.interval)
+    if not results:
+        print(f"No dataset asks for {args.interval} snapshots.")
+        return 0
+
+    failed = 0
+    for r in results:
+        if r["error"]:
+            failed += 1
+            print(f"FAIL  {r['dataset']}: {r['error']}", file=sys.stderr)
+            continue
+        pruned = f", pruned {len(r['destroyed'])}" if r["destroyed"] else ""
+        print(f"OK    {r['created']}{pruned}")
+    return 1 if failed else 0
+
+
 def cmd_ensure_tls(args) -> int:
     try:
         from freedomnas import tls
@@ -265,6 +298,17 @@ def main() -> int:
         default=None,
         help="Path to a desired-state YAML file (default: use the config.yaml shadow copy)",
     )
+    snapshot_parser = sub.add_parser(
+        "snapshot-run",
+        help="Take and prune the scheduled snapshots for one interval (called from cron)",
+    )
+    snapshot_parser.add_argument(
+        "--interval",
+        choices=["hourly", "daily", "weekly", "monthly"],
+        required=True,
+        help="Which retention interval to apply",
+    )
+
     tls_parser = sub.add_parser(
         "ensure-tls",
         help="Create the WebUI's self-signed certificate if it is not there yet",
@@ -284,6 +328,7 @@ def main() -> int:
         "unlock-pools": cmd_unlock_pools,
         "reconcile":    cmd_reconcile,
         "ensure-tls":   cmd_ensure_tls,
+        "snapshot-run": cmd_snapshot_run,
         "serve":        cmd_serve,
         "version":      cmd_version,
     }
