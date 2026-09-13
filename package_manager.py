@@ -118,6 +118,16 @@ class PackageManager:
         """Get services to enable for a category and OS edition."""
         return self._edition_values(category_id, edition, "services", init_system)
 
+    def get_early_services_for_os(
+        self, category_id: str, edition: str, init_system: Optional[str] = None
+    ) -> List[str]:
+        """
+        Get services that must come up before everything else — importing and
+        mounting pools — enabled through the init profile's `enable_early`
+        where it has one (OpenRC's sysinit runlevel).
+        """
+        return self._edition_values(category_id, edition, "early_services", init_system)
+
     def _edition_values(
         self, category_id: str, edition: str, key: str, init_system: Optional[str]
     ) -> List[Any]:
