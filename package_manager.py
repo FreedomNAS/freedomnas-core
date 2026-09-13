@@ -106,6 +106,13 @@ class PackageManager:
 
         return category[edition].get("packages", [])
 
+    def get_aur_packages_for_os(self, category_id: str, edition: str) -> List[str]:
+        """Get packages a category builds from the AUR, after the repository packages."""
+        category = self._load_category(category_id)
+        if edition not in category:
+            raise ValueError(f"Edition '{edition}' not supported in category '{category_id}'")
+        return category[edition].get("aur", [])
+
     def get_services_for_os(self, category_id: str, edition: str) -> List[str]:
         """Get services to enable for a category and OS edition."""
         category = self._load_category(category_id)
