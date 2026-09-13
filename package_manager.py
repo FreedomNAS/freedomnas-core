@@ -86,39 +86,49 @@ class PackageManager:
                 return cat
         raise ValueError(f"Category not found: {category_id}")
 
-    def get_packages_for_os(self, category_id: str, edition: str) -> List[str]:
+    def get_packages_for_os(
+        self, category_id: str, edition: str, init_system: Optional[str] = None
+    ) -> List[str]:
         """
         Get package list for a category and OS edition.
 
         Args:
             category_id: Category ID (e.g., 'core', 'samba-cifs')
             edition: OS edition ('debian', 'freebsd', 'arch')
+            init_system: Adds the edition's `init.<init_system>` packages, for
+                         editions that ship their service scripts separately
+                         per init (Artix's openssh-openrc, openssh-dinit, ...)
 
         Returns:
             List of package names for that OS
         """
         if edition not in self.manifest.get("supported_editions", []):
             raise ValueError(f"Unsupported edition: {edition}")
+        return self._edition_values(category_id, edition, "packages", init_system)
 
-        category = self._load_category(category_id)
-        if edition not in category:
-            raise ValueError(f"Edition '{edition}' not supported in category '{category_id}'")
+    def get_pkgbuilds_for_os(
+        self, category_id: str, edition: str, init_system: Optional[str] = None
+    ) -> List[Dict[str, str]]:
+        """Get the {name, git} PKGBUILD repositories a category builds after its packages."""
+        return self._edition_values(category_id, edition, "pkgbuilds", init_system)
 
-        return category[edition].get("packages", [])
-
-    def get_aur_packages_for_os(self, category_id: str, edition: str) -> List[str]:
-        """Get packages a category builds from the AUR, after the repository packages."""
-        category = self._load_category(category_id)
-        if edition not in category:
-            raise ValueError(f"Edition '{edition}' not supported in category '{category_id}'")
-        return category[edition].get("aur", [])
-
-    def get_services_for_os(self, category_id: str, edition: str) -> List[str]:
+    def get_services_for_os(
+        self, category_id: str, edition: str, init_system: Optional[str] = None
+    ) -> List[str]:
         """Get services to enable for a category and OS edition."""
+        return self._edition_values(category_id, edition, "services", init_system)
+
+    def _edition_values(
+        self, category_id: str, edition: str, key: str, init_system: Optional[str]
+    ) -> List[Any]:
         category = self._load_category(category_id)
         if edition not in category:
             raise ValueError(f"Edition '{edition}' not supported in category '{category_id}'")
-        return category[edition].get("services", [])
+        entry = category[edition]
+        values = list(entry.get(key, []))
+        if init_system:
+            values += entry.get("init", {}).get(init_system, {}).get(key, [])
+        return values
 
     def get_config_paths(self, category_id: str, edition: str) -> List[str]:
         """Get configuration file paths for backup/restore."""
