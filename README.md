@@ -20,9 +20,39 @@ Arch: systemctl restart samba
 
 ## Components
 
-- **engine.py**: The main engine
+- **engine.py**: Backend selection — everything imports the engine from here
+- **engine_py.py**: The engine in pure Python (default backend)
+- **engine_native.py**: The engine in Nim, through a Python extension module
+- **nim/**: Nim sources for the native engine and the `freedomnas` CLI
 - **config.py**: Persistent configuration management
 - **os_profiles/**: Directory containing the JSON profiles for each OS
+
+### Two engines, one behaviour
+
+The engine is being moved to Nim one piece at a time, so a build with no
+Python runtime becomes possible at boot. Both implementations ship, and
+`FREEDOMNAS_ENGINE` picks one:
+
+| Value | Engine |
+|-------|--------|
+| `python` (default) | `engine_py.py` |
+| `native` | `engine_native.py`, `ImportError` if the extension is missing |
+| `auto` | native when built, Python otherwise |
+
+They are not allowed to differ: `tests/test_engine_parity.py` runs every
+command of every shipped profile through both and compares the results,
+the exceptions and their messages. Run the suite twice before changing
+either:
+
+```bash
+cd nim && nimble native && cd ..        # builds ../freedomnas_native.so
+python3 -m pytest tests/ -q
+FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
+```
+
+`nimble cli` builds `nim/freedomnas`, the native CLI (`status`, `check`,
+`version`). Everything that needs `config.yaml` or the keyslots is still
+`python -m freedomnas`.
 
 ## Quick Usage
 

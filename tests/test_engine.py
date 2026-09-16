@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 from engine import (
+    BACKEND,
     CommandExecutionError,
     CommandTranslationError,
     FreedomNASEngine,
@@ -47,6 +48,18 @@ def reset_singleton():
     yield
     FreedomNASEngine._instance = None
     FreedomNASEngine._initialized = False
+
+
+# These tests reach inside the pure-Python engine: they patch subprocess.run
+# or builtins.open and assert on how it calls them. The native engine runs
+# commands in Nim, where those patches do not apply — and would execute the
+# real command instead of a mock. The same behaviour is verified against the
+# Python engine, backend to backend, in test_engine_parity.py.
+mocks_python_internals = pytest.mark.skipif(
+    BACKEND == "native",
+    reason="patches Python internals the native engine does not use; "
+           "covered by test_engine_parity.py",
+)
 
 
 def make_engine(os_override: str = "debian") -> FreedomNASEngine:
@@ -192,6 +205,7 @@ class TestProfileLoading:
         with pytest.raises(OSNotSupportedException):
             FreedomNASEngine(profile_dir="/nonexistent/path", os_override="debian")
 
+    @mocks_python_internals
     def test_invalid_json_raises(self):
         with patch("builtins.open", mock_open(read_data="not json {")), \
              patch("pathlib.Path.exists", return_value=True):
@@ -267,6 +281,7 @@ class TestGetCommand:
 # execute — routing logic
 # ---------------------------------------------------------------------------
 
+@mocks_python_internals
 class TestExecuteRouting:
     def _make_result(self, stdout="ok", stderr="", returncode=0):
         result = MagicMock()

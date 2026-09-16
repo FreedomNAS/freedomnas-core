@@ -3,13 +3,22 @@
 export PYBUILD_NAME=freedomnas-core
 export PYBUILD_DESTDIR_python3=debian/freedomnas-core
 
+# nimble resolves nimpy into the build tree, so the build needs network
+# access the first time; the compiled extension then travels inside the wheel.
+export NIMBLE_DIR=$(CURDIR)/debian/nimble
+
 %:
 	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_build:
+	cd nim && nimble -y --nimbleDir:$(NIMBLE_DIR) native
+	dh_auto_build
 
 override_dh_python3:
 	dh_python3
 	dh_python3 -p freedomnas-core --shebang=/usr/bin/python3
 
 override_dh_auto_test:
-	# Run tests if available
+	# Both engines must answer identically; see tests/test_engine_parity.py
 	-python3 -m pytest tests/ -v 2>/dev/null || true
+	-FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -v 2>/dev/null || true

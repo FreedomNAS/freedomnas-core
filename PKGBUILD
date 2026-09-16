@@ -3,7 +3,7 @@ pkgname=freedomnas-core
 pkgver=4.0.0
 pkgrel=1
 pkgdesc="FreedomNAS Core Engine — OS-agnostic storage appliance"
-arch=('any')
+arch=('x86_64' 'aarch64')
 url="https://codeberg.org/freedomnas/freedomnas-core"
 license=('MPL-2.0')
 depends=(
@@ -12,7 +12,8 @@ depends=(
     'python-yaml'
     'python-cryptography'
 )
-makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel'
+             'nim' 'git' 'gcc')
 optdepends=(
     'zfs: ZFS support (highly recommended)'
     'zfs-dkms: ZFS kernel module on non-LTS kernels'
@@ -22,6 +23,9 @@ sha256sums=('SKIP')
 install=freedomnas-core.install
 
 build() {
+    cd "${srcdir}/${pkgname}/nim"
+    nimble -y --nimbleDir:"${srcdir}/nimble" native
+
     cd "${srcdir}/${pkgname}"
     python -m build --wheel --no-isolation
 }
