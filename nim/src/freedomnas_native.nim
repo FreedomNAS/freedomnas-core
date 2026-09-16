@@ -1,6 +1,7 @@
 import std/[json, locks, tables]
 import nimpy
-import fnas/[engine, errors, osdetect, pyformat, shlexutil]
+import fnas/[engine, errors, osdetect, pyformat, pyyaml, shlexutil, yamlvalue]
+import fnas/config as fnasconfig
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -158,3 +159,32 @@ proc engine_invocation(handle: int, command: string): string {.exportpy.} =
   guarded:
     let invocation = lookup(handle).resolveInvocation(command)
     $(%*{"argv": invocation.argv, "use_shell": invocation.useShell})
+
+# ---------------------------------------------------------------------------
+# Configuration — YAML reading and writing, merge, validation
+# ---------------------------------------------------------------------------
+
+proc config_defaults(): string {.exportpy.} =
+  guarded:
+    $(%*{"value": toJson(fnasconfig.defaults())})
+
+proc config_parse(text: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": toJson(pyyaml.load(text))})
+
+proc config_dump(valueJson: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": pyyaml.dump(fromJson(parseJson(valueJson)))})
+
+proc config_merge_defaults(valueJson: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": toJson(fnasconfig.mergeWithDefaults(fromJson(parseJson(valueJson))))})
+
+proc config_validate(valueJson: string): string {.exportpy.} =
+  guarded:
+    fnasconfig.validate(fromJson(parseJson(valueJson)))
+    $(%*{"value": true})
+
+proc config_header(valueJson, now: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnasconfig.header(fromJson(parseJson(valueJson)), now)})

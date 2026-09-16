@@ -1,9 +1,10 @@
 name: tests
 
-# The suite runs twice: once on the pure-Python engine, once on the Nim one.
-# tests/test_engine_parity.py is what makes the second run meaningful — it
-# asks both engines the same questions and compares the answers, failures
-# included.
+# The suite runs twice: once on pure Python, once on Nim (FREEDOMNAS_ENGINE
+# also moves the configuration manager, since FREEDOMNAS_CONFIG follows it).
+# The parity suites are what make the second run meaningful — they ask both
+# implementations the same questions and compare the answers, the failures
+# and, for the configuration, the bytes written.
 
 on:
   push:
@@ -31,8 +32,11 @@ jobs:
       - name: Build the native engine
         run: cd nim && nimble -y native
 
-      - name: Python engine
+      - name: Python engine and config
         run: python3 -m pytest tests/ -q
 
-      - name: Native engine
+      - name: Native engine and config
         run: FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
+
+      - name: Mixed — native engine, PyYAML config
+        run: FREEDOMNAS_ENGINE=native FREEDOMNAS_CONFIG=python python3 -m pytest tests/ -q

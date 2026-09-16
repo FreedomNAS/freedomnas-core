@@ -24,7 +24,9 @@ Arch: systemctl restart samba
 - **engine_py.py**: The engine in pure Python (default backend)
 - **engine_native.py**: The engine in Nim, through a Python extension module
 - **nim/**: Nim sources for the native engine and the `freedomnas` CLI
-- **config.py**: Persistent configuration management
+- **config.py**: Persistent configuration management — backend selection
+- **config_py.py**: Configuration manager on PyYAML (default backend)
+- **config_native.py**: Same manager with the YAML end in Nim
 - **os_profiles/**: Directory containing the JSON profiles for each OS
 
 ### Two engines, one behaviour
@@ -39,10 +41,15 @@ Python runtime becomes possible at boot. Both implementations ship, and
 | `native` | `engine_native.py`, `ImportError` if the extension is missing |
 | `auto` | native when built, Python otherwise |
 
-They are not allowed to differ: `tests/test_engine_parity.py` runs every
-command of every shipped profile through both and compares the results,
-the exceptions and their messages. Run the suite twice before changing
-either:
+`FREEDOMNAS_CONFIG` does the same for the configuration manager and, when
+unset, follows `FREEDOMNAS_ENGINE` — so one variable moves the whole core
+and the other pins the configuration back on its own.
+
+They are not allowed to differ. `tests/test_engine_parity.py` runs every
+command of every shipped profile through both engines and compares the
+results, the exceptions and their messages; `tests/test_config_parity.py`
+compares the **bytes** both managers write, because an appliance reads back
+what the other one saved. Run the suite twice before changing either:
 
 ```bash
 cd nim && nimble native && cd ..        # builds ../freedomnas_native.so
@@ -50,8 +57,10 @@ python3 -m pytest tests/ -q
 FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
 ```
 
-`nimble cli` builds `nim/freedomnas`, the native CLI (`status`, `check`,
-`version`). Everything that needs `config.yaml` or the keyslots is still
+`nimble cli` builds `nim/freedomnas`, the native CLI: `status`, `check`,
+`config show|check|path` and `version`, with no interpreter involved.
+What still needs Python is everything built on the keyslots or the module
+runtime — `reconcile`, `unlock-pools`, `serve` — through
 `python -m freedomnas`.
 
 ## Quick Usage

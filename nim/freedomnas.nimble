@@ -7,6 +7,7 @@ bin           = @["freedomnas_cli"]
 
 requires "nim >= 2.0.0"
 requires "nimpy >= 0.2.0"
+requires "yaml >= 2.1.0"
 
 task native, "Build the Python extension module into the package root":
   exec "nim c --app:lib -d:release --threads:on " &

@@ -7,6 +7,7 @@ type
     ekKey = "key"
     ekValue = "value"
     ekOsError = "os_error"
+    ekConfig = "config"
 
   FnasError* = object of CatchableError
     kind*: ErrorKind
