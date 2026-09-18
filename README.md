@@ -63,24 +63,25 @@ interpreter involved. What still needs Python is everything built on the
 keyslots or the module runtime — `reconcile`, `unlock-pools`, `serve` —
 through `python -m freedomnas`.
 
-### Three implementations, same pattern
+### More than two implementations, same pattern
 
-Scheduled snapshots (`snapshots.py`) follow the same split as the engine
-and the configuration manager:
+Scheduled snapshots (`snapshots.py`) and pool composition (`pools.py`)
+follow the same split as the engine and the configuration manager. Both
+native sides call the engine's native handle directly — `engine._handle` —
+so they only make sense paired with the native engine, and both are held to
+the pure-Python behaviour by a parity test against a throwaway "zfs"
+profile whose actions read and write a plain file instead of talking to
+real ZFS:
 
-| File | What it is |
-|------|-----------|
-| `snapshots.py` | Backend switch — `FREEDOMNAS_SNAPSHOTS`, following `FREEDOMNAS_ENGINE` when unset |
-| `snapshots_py.py` | The scheduler in pure Python — the reference implementation |
-| `snapshots_native.py` | The Python side of the Nim scheduler: calls the native engine's handle directly |
-| `nim/src/fnas/snapshots.nim` | The scheduling logic itself — naming, listing "ours", pruning |
+| Module | Backend switch | Pure Python | Native Python side | Nim logic | Parity test |
+|--------|----------------|-------------|---------------------|-----------|-------------|
+| Scheduled snapshots | `snapshots.py` (`FREEDOMNAS_SNAPSHOTS`) | `snapshots_py.py` | `snapshots_native.py` | `nim/src/fnas/snapshots.nim` | `tests/test_snapshots_parity.py` |
+| Pool cache/log devices | `pools.py` (`FREEDOMNAS_POOLS`) | `pools_py.py` | `pools_native.py` | `nim/src/fnas/pools.nim` | `tests/test_pools_parity.py` |
 
-`tests/test_snapshots_parity.py` holds the two to identical behaviour,
-against a throwaway "zfs" profile whose snapshot actions read and write a
-plain file instead of talking to real ZFS. The native scheduler only makes
-sense paired with the native engine — it calls `engine._handle` directly —
-which is also what makes `freedomnas snapshot-run <interval>` possible with
-no Python interpreter at all.
+Every one of these backend switches follows `FREEDOMNAS_ENGINE` when its
+own variable is unset. Scheduled snapshots are also what makes
+`freedomnas snapshot-run <interval>` possible with no Python interpreter
+at all.
 
 ## Quick Usage
 

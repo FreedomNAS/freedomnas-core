@@ -2,7 +2,15 @@
 
 import pytest
 
-from pools import CommandExecutionError, attach_devices, detach_device
+from pools import BACKEND, CommandExecutionError, attach_devices, detach_device
+
+# FakeEngine has no native handle, so these exercise the pure-Python
+# implementation's own logic directly. The native backend is verified
+# against the Python one, backend to backend, in test_pools_parity.py.
+uses_fake_engine = pytest.mark.skipif(
+    BACKEND == "native",
+    reason="FakeEngine has no native handle; covered by test_pools_parity.py",
+)
 
 
 class FakeEngine:
@@ -17,6 +25,7 @@ class FakeEngine:
         return "", ""
 
 
+@uses_fake_engine
 def test_cache_and_log_go_in_together():
     engine = FakeEngine()
     result = attach_devices(engine, "tank", cache=["/dev/ssd1"], log=["/dev/ssd2"])
@@ -26,18 +35,21 @@ def test_cache_and_log_go_in_together():
     assert engine.calls == [("pool_add_cache", "/dev/ssd1"), ("pool_add_log", "/dev/ssd2")]
 
 
+@uses_fake_engine
 def test_several_devices_go_in_one_command():
     engine = FakeEngine()
     attach_devices(engine, "tank", cache=["/dev/a", "/dev/b"])
     assert engine.calls == [("pool_add_cache", "/dev/a /dev/b")]
 
 
+@uses_fake_engine
 def test_nothing_asked_for_runs_nothing():
     engine = FakeEngine()
     assert attach_devices(engine, "tank") == {"cache": [], "log": [], "errors": []}
     assert engine.calls == []
 
 
+@uses_fake_engine
 def test_a_cache_that_will_not_attach_is_reported_not_raised():
     engine = FakeEngine(failing={"pool_add_cache"})
     result = attach_devices(engine, "tank", cache=["/dev/rotto"], log=["/dev/ssd"])
@@ -47,6 +59,7 @@ def test_a_cache_that_will_not_attach_is_reported_not_raised():
     assert result["errors"][0]["role"] == "cache"
 
 
+@uses_fake_engine
 def test_removal_lets_zfs_refuse():
     engine = FakeEngine(failing={"pool_remove_device"})
     with pytest.raises(CommandExecutionError):

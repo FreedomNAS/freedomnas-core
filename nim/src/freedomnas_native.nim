@@ -3,6 +3,7 @@ import nimpy
 import fnas/[engine, errors, osdetect, pyformat, pyyaml, shlexutil, yamlvalue]
 import fnas/config as fnasconfig
 import fnas/snapshots as fnassnapshots
+import fnas/pools as fnaspools
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -204,3 +205,29 @@ proc snapshot_run(handle: int, policiesJson, interval, nowIso: string): string {
     withoutGil:
       results = fnassnapshots.runInterval(eng, policies, interval, asOf)
     $(%*{"value": results})
+
+# ---------------------------------------------------------------------------
+# Pool composition — cache and log devices
+# ---------------------------------------------------------------------------
+
+proc toStringSeq(node: JsonNode): seq[string] =
+  for item in node.items:
+    result.add item.getStr
+
+proc pool_attach_devices(handle: int, poolName, cacheJson, logJson: string): string {.exportpy.} =
+  guarded:
+    let
+      cache = toStringSeq(parseJson(cacheJson))
+      logs = toStringSeq(parseJson(logJson))
+      eng = lookup(handle)
+    var res: JsonNode
+    withoutGil:
+      res = fnaspools.attachDevices(eng, poolName, cache, logs)
+    $(%*{"value": res})
+
+proc pool_detach_device(handle: int, poolName, device: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    withoutGil:
+      fnaspools.detachDevice(eng, poolName, device)
+    $(%*{"value": true})
