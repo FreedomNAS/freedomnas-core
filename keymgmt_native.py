@@ -50,6 +50,7 @@ _ERROR_CLASSES = {
     "keymgmt": SlotUnavailableError,
     "translation": CommandTranslationError,
     "execution": CommandExecutionError,
+    "os_error": OSError,
 }
 
 

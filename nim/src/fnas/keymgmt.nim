@@ -51,9 +51,12 @@ const
 # ---------------------------------------------------------------------------
 
 proc genRandomBytes(n: int): seq[byte] =
+  ## randomBytes reports failure by returning fewer bytes, never by raising
+  ## — and on FreeBSD it needs /dev/urandom, which a chroot or jail without
+  ## devfs does not have. Ignoring that would leave a zero-filled pool key.
   result = newSeq[byte](n)
-  if n > 0:
-    discard ncsysrand.randomBytes(result)
+  if n > 0 and ncsysrand.randomBytes(result) != n:
+    raiseFnas(ekOsError, "Could not read " & $n & " random bytes from the system")
 
 proc toBytes(s: string): seq[byte] =
   result = newSeq[byte](s.len)
