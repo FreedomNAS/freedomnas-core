@@ -208,14 +208,13 @@ def run_tty_unlock(unlocker, pool_name, feed, timeout=10):
     on the pty master side. Returns the unlock result.
 
     This is how try_tty_unlock always runs in production —
-    `python -m freedomnas unlock-pools` is single-threaded and short-lived,
-    never a background thread inside a long-running interpreter. It also
-    has to run this way here: the native engine's allocator (Nim, ORC,
-    --threads:on) reliably segfaults the first time a *thread* — as
-    opposed to a *process* — created by something other than Nim itself
-    calls into it after the process has done enough prior allocation, a
-    known upstream sharp edge with no clean workaround short of avoiding
-    the pattern. Forking sidesteps it entirely and matches production.
+    `python -m freedomnas unlock-pools` is its own short-lived process,
+    started by firstboot.sh, never a background thread inside a
+    long-running interpreter — so the test runs it the same way.
+
+    Threads calling into the native core are not the reason: the TLS flags
+    in nim/freedomnas.nimble fixed the segfault they used to cause, and
+    test_native_threads.py keeps it fixed.
     """
     master_fd, slave_fd = pty.openpty()
     slave_path = os.ttyname(slave_fd)
