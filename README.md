@@ -93,7 +93,12 @@ pure-Python behaviour by a parity test:
 | Package manager | `package_manager.py` (`FREEDOMNAS_PACKAGES`) | `package_manager_py.py` | `package_manager_native.py` | `nim/src/fnas/packages.nim` | `tests/test_package_manager_parity.py` |
 
 Every one of these backend switches follows `FREEDOMNAS_ENGINE` when its
-own variable is unset. Scheduled snapshots and the shadow copy are also
+own variable is unset. The ones that drive the engine's native handle
+(snapshots, pools, shadow, reconcile, keymgmt) also follow it back: under
+`FREEDOMNAS_ENGINE=python` they use Python whatever their own variable
+says, so setting the engine back is always a complete rollback, while under
+the native engine any one of them can still be pinned to Python on its own
+(`tests/test_backend_selection.py`). Scheduled snapshots and the shadow copy are also
 what make `freedomnas snapshot-run <interval>` and `freedomnas shadow-sync`
 possible with no Python interpreter at all — reconcile and keymgmt have no
 such native CLI command (both stay reachable only through
