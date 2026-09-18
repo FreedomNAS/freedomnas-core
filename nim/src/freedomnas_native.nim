@@ -291,6 +291,15 @@ proc reconcile_run(handle: int, desiredPath, mode, stateJson,
       results = fnasreconcile.reconcileRun(eng, desiredPath, mode, state, nfsShares)
     $(%*{"value": results})
 
+proc reconcile_compute_diff(desiredJson, currentJson, mode: string): string {.exportpy.} =
+  guarded:
+    let changes = fnasreconcile.computeDiff(parseJson(desiredJson), parseJson(currentJson), mode)
+    $(%*{"value": changes})
+
+proc reconcile_load_desired(path: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnasreconcile.loadDesired(path)})
+
 # ---------------------------------------------------------------------------
 # Encryption key management
 # ---------------------------------------------------------------------------

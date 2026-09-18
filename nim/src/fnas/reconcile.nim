@@ -114,7 +114,12 @@ proc computeDiff*(desired, current: JsonNode, mode: string): seq[JsonNode] =
   diffShares(desired, current, "nfs_shares", "nfs_shares", result)
 
 proc loadDesired*(path: string): JsonNode =
-  let val = pyyaml.load(readFile(path))
+  var text: string
+  try:
+    text = readFile(path)
+  except IOError as exc:
+    raiseFnas(ekOsError, exc.msg & ": '" & path & "'")
+  let val = pyyaml.load(text)
   if val == nil: newJObject() else: toJson(val)
 
 # ---------------------------------------------------------------------------

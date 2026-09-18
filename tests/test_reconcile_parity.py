@@ -1,7 +1,7 @@
 """
 The native ReconciliationEngine must answer exactly like the pure-Python
-one, end to end through `reconcile()` — the only method the native backend
-implements (see reconcile_native.py; the internal `_do_*`/`_apply_*` split
+one, through its public API: `reconcile()` end to end, and `compute_diff()`
+and `load_desired()` called directly (the internal `_do_*`/`_apply_*` split
 is tested against the pure implementation alone in test_reconcile.py).
 
 Both implementations run against a throwaway profile whose system/zfs/
@@ -192,3 +192,115 @@ def test_no_changes_is_an_empty_run(backend_pair):
     py, native = backend_pair({"system": {"hostname": "nas"}})
 
     assert outcome(py.reconcile) == outcome(native.reconcile) == ("ok", [])
+
+
+# ---------------------------------------------------------------------------
+# compute_diff and load_desired, called directly
+# ---------------------------------------------------------------------------
+
+import random
+
+import yaml
+
+NAMES = ["alice", "bob", "carol", "dave"]
+GROUPS = ["sudo", "wheel", "samba", "media"]
+
+
+def random_state(rng):
+    state = {}
+    if rng.random() < .9:
+        state["system"] = {"hostname": rng.choice(["nas", "old", "new"])}
+        if rng.random() < .6:
+            state["system"]["timezone"] = rng.choice(["UTC", "Europe/Rome"])
+    if rng.random() < .8:
+        state["users"] = [
+            {"username": u, "groups": rng.sample(GROUPS, rng.randint(0, 3)),
+             **({"shell": "/bin/sh"} if rng.random() < .3 else {})}
+            for u in rng.sample(NAMES, rng.randint(0, 4))
+        ]
+    if rng.random() < .7:
+        state["storage"] = {"pools": [{"name": p}
+                                      for p in rng.sample(["tank", "rpool", "data"], rng.randint(0, 3))]}
+    if rng.random() < .7:
+        state["smb_shares"] = [
+            {"name": n, "path": f"/tank/{n}{rng.randint(0, 1)}",
+             **({"read_only": rng.random() < .5} if rng.random() < .5 else {})}
+            for n in rng.sample(["media", "docs", "backup"], rng.randint(0, 3))
+        ]
+    if rng.random() < .7:
+        state["nfs_shares"] = [
+            {"name": n, "path": f"/tank/{n}", "clients": rng.choice(["*", "10.0.0.0/8"])}
+            for n in rng.sample(["home", "vm"], rng.randint(0, 2))
+        ]
+    return state
+
+
+def as_changes(changes):
+    return [(c.path, c.old_value, c.new_value, c.change_type) for c in changes]
+
+
+@pytest.mark.parametrize("mode", ["hybrid", "declarative", reconcile_py.ReconcileMode.DECLARATIVE])
+def test_compute_diff_matches_on_random_states(mode):
+    rng = random.Random(20260918)
+    py = reconcile_py.ReconciliationEngine(None, None)
+    native = reconcile_native.ReconciliationEngine(None, None)
+    for _ in range(300):
+        desired, current = random_state(rng), random_state(rng)
+        assert (as_changes(py.compute_diff(desired, current, mode))
+                == as_changes(native.compute_diff(desired, current, mode))), (desired, current)
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "# nothing\n",
+    "system:\n  hostname: nas\n",
+    "users:\n- username: alice\n  groups: [sudo, samba]\n",
+    "- a\n- list\n",
+    "[]\n",
+    "when: 2026-07-18 10:30:00\n",
+    "smb_shares:\n- name: media\n  path: /tank/media\n  read_only: yes\n",
+])
+def test_load_desired_matches(tmp_path, text):
+    path = tmp_path / "desired.yaml"
+    path.write_text(text)
+    py = reconcile_py.ReconciliationEngine(None, None)
+    native = reconcile_native.ReconciliationEngine(None, None)
+    assert native.load_desired(str(path)) == py.load_desired(str(path))
+
+
+def test_load_desired_failures_match(tmp_path):
+    py = reconcile_py.ReconciliationEngine(None, None)
+    native = reconcile_native.ReconciliationEngine(None, None)
+
+    with pytest.raises(OSError):
+        py.load_desired(str(tmp_path / "missing.yaml"))
+    with pytest.raises(OSError):
+        native.load_desired(str(tmp_path / "missing.yaml"))
+
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("a: [unclosed\n")
+    with pytest.raises(yaml.YAMLError):
+        py.load_desired(str(broken))
+    with pytest.raises(yaml.YAMLError):
+        native.load_desired(str(broken))
+
+
+@pytest.mark.parametrize("desired", [
+    {"users": [{"groups": []}]},
+    {"users": None},
+    {"system": None},
+    {"smb_shares": [{"path": "/x"}]},
+])
+def test_known_divergence_on_malformed_entries(desired):
+    """
+    Recorded rather than hidden: an entry without its key, or a section that
+    is null, makes the Python reconciler die with whatever Python error it
+    hits first; the native one leaves that entry out of the diff. Neither
+    can come from a config.yaml the managers wrote. Asserted, so a change on
+    either side shows up.
+    """
+    py = reconcile_py.ReconciliationEngine(None, None)
+    native = reconcile_native.ReconciliationEngine(None, None)
+    with pytest.raises((KeyError, TypeError, AttributeError)):
+        py.compute_diff(desired, {})
+    assert isinstance(native.compute_diff(desired, {}), list)
