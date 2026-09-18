@@ -5,6 +5,7 @@ import fnas/config as fnasconfig
 import fnas/snapshots as fnassnapshots
 import fnas/pools as fnaspools
 import fnas/shadow as fnasshadow
+import fnas/reconcile as fnasreconcile
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -259,4 +260,20 @@ proc shadow_sync(handle: int, configPath: string): string {.exportpy.} =
     var results: JsonNode
     withoutGil:
       results = fnasshadow.syncAll(eng, configPath)
+    $(%*{"value": results})
+
+# ---------------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------------
+
+proc reconcile_run(handle: int, desiredPath, mode, stateJson,
+                   nfsSharesJson: string): string {.exportpy.} =
+  guarded:
+    let
+      state = parseJson(stateJson)
+      nfsShares = parseJson(nfsSharesJson)
+      eng = lookup(handle)
+    var results: JsonNode
+    withoutGil:
+      results = fnasreconcile.reconcileRun(eng, desiredPath, mode, state, nfsShares)
     $(%*{"value": results})
