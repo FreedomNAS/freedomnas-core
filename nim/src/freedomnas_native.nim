@@ -6,6 +6,7 @@ import fnas/snapshots as fnassnapshots
 import fnas/pools as fnaspools
 import fnas/shadow as fnasshadow
 import fnas/reconcile as fnasreconcile
+import fnas/keymgmt as fnaskeymgmt
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -277,3 +278,76 @@ proc reconcile_run(handle: int, desiredPath, mode, stateJson,
     withoutGil:
       results = fnasreconcile.reconcileRun(eng, desiredPath, mode, state, nfsShares)
     $(%*{"value": results})
+
+# ---------------------------------------------------------------------------
+# Encryption key management
+# ---------------------------------------------------------------------------
+
+proc keymgmt_wrap_key(rawKeyHex, secretHex: string): string {.exportpy.} =
+  guarded:
+    let
+      rawKey = fnaskeymgmt.fromHexStrict(rawKeyHex)
+      secret = fnaskeymgmt.fromHexStrict(secretHex)
+    $(%*{"value": fnaskeymgmt.wrapKey(rawKey, secret)})
+
+proc keymgmt_unwrap_key(slotJson, secretHex: string): string {.exportpy.} =
+  guarded:
+    let
+      slot = parseJson(slotJson)
+      secret = fnaskeymgmt.fromHexStrict(secretHex)
+      rawKey = fnaskeymgmt.unwrapKey(slot, secret)
+    $(%*{"value": fnaskeymgmt.toHexStr(rawKey)})
+
+proc keymgmt_store_exists(poolName, keyslotDir: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaskeymgmt.newKeyslotStore(poolName, keyslotDir).storeExists()})
+
+proc keymgmt_store_get_slot(poolName, keyslotDir, name: string): string {.exportpy.} =
+  guarded:
+    let slot = fnaskeymgmt.newKeyslotStore(poolName, keyslotDir).getSlot(name)
+    $(%*{"value": (if slot == nil: newJNull() else: slot)})
+
+proc keymgmt_store_set_slot(poolName, keyslotDir, name, slotJson: string): string {.exportpy.} =
+  guarded:
+    fnaskeymgmt.newKeyslotStore(poolName, keyslotDir).setSlot(name, parseJson(slotJson))
+    $(%*{"value": true})
+
+proc keymgmt_list_locked_pools(handle: int): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var pools: seq[string]
+    withoutGil:
+      pools = fnaskeymgmt.listLockedPools(eng)
+    $(%*{"value": pools})
+
+proc keymgmt_try_usb_unlock(handle: int, poolName, keyslotDir, usbMountpoint,
+                            runtimeKeyDir: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var ok: bool
+    withoutGil:
+      ok = fnaskeymgmt.tryUsbUnlock(eng, poolName, keyslotDir, usbMountpoint, runtimeKeyDir)
+    $(%*{"value": ok})
+
+proc keymgmt_try_tty_unlock(handle: int, poolName, ttyPath: string, timeout: int,
+                            keyslotDir, runtimeKeyDir: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var ok: bool
+    withoutGil:
+      ok = fnaskeymgmt.tryTtyUnlock(eng, poolName, ttyPath, timeout, keyslotDir, runtimeKeyDir)
+    $(%*{"value": ok})
+
+proc keymgmt_create_encrypted_pool(handle: int, poolName, vdevType, devices, masterPassphrase,
+                                   usbDevicesJson: string, ashift: int, compression, keyslotDir,
+                                   runtimeKeyDir, usbMountpoint: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var usbDevices: seq[string]
+    for item in parseJson(usbDevicesJson).items:
+      usbDevices.add item.getStr
+    withoutGil:
+      fnaskeymgmt.createEncryptedPool(eng, poolName, vdevType, devices, masterPassphrase,
+                                      usbDevices, ashift, compression,
+                                      keyslotDir, runtimeKeyDir, usbMountpoint)
+    $(%*{"value": true})

@@ -57,6 +57,15 @@ python3 -m pytest tests/ -q
 FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
 ```
 
+Both `nimble native` and `nimble cli` build with `--tlsEmulation:off
+--passC:"-ftls-model=global-dynamic"`. Without it, the first thread the
+*host process* creates (not Nim — `asyncio.to_thread`, `threading.Thread`;
+the WebUI uses this for `reconcile()`) to call into the native engine
+segfaults, reliably, once the process has done enough allocator activity —
+one scrypt-sized keyslot wrap (`keymgmt.py`, ~32 MiB) is enough on its own.
+See [Core Engine](../freedomnas-docs/docs/architecture/engine.md#building-it)
+for why.
+
 `nimble cli` builds `nim/freedomnas`, the native CLI: `status`, `check`,
 `config show|check|path`, `snapshot-run <interval>`, `shadow-sync` and
 `version`, with no interpreter involved. What still needs Python is
@@ -66,14 +75,15 @@ everything built on the keyslots or the module runtime — `reconcile`,
 ### More than two implementations, same pattern
 
 Scheduled snapshots (`snapshots.py`), pool composition (`pools.py`), the
-configuration's shadow copy (`shadow.py`) and the reconciliation engine
-(`reconcile.py`) follow the same split as the engine and the configuration
-manager. Every native side calls the engine's native handle directly —
-`engine._handle` — so none of them makes sense without the native engine,
-and all four are held to the pure-Python behaviour by a parity test
-against a throwaway "zfs"/system/users/samba/nfs/services profile whose
-actions read and write a plain file — or are plain no-ops — instead of
-talking to the real OS:
+configuration's shadow copy (`shadow.py`), the reconciliation engine
+(`reconcile.py`) and encrypted-pool key management (`keymgmt.py`) follow
+the same split as the engine and the configuration manager. Every native
+side calls the engine's native handle directly — `engine._handle` — so
+none of them makes sense without the native engine, and all five are held
+to the pure-Python behaviour by a parity test against a throwaway
+"zfs"/system/users/samba/nfs/services/media profile whose actions read and
+write a plain file — or are plain no-ops — instead of talking to the real
+OS:
 
 | Module | Backend switch | Pure Python | Native Python side | Nim logic | Parity test |
 |--------|----------------|-------------|---------------------|-----------|-------------|
@@ -81,14 +91,17 @@ talking to the real OS:
 | Pool cache/log devices | `pools.py` (`FREEDOMNAS_POOLS`) | `pools_py.py` | `pools_native.py` | `nim/src/fnas/pools.nim` | `tests/test_pools_parity.py` |
 | Configuration's shadow copy | `shadow.py` (`FREEDOMNAS_SHADOW`) | `shadow_py.py` | `shadow_native.py` | `nim/src/fnas/shadow.nim` | `tests/test_shadow_parity.py` |
 | Reconciliation engine | `reconcile.py` (`FREEDOMNAS_RECONCILE`) | `reconcile_py.py` | `reconcile_native.py` | `nim/src/fnas/reconcile.nim` | `tests/test_reconcile_parity.py` |
+| Encrypted-pool keyslots | `keymgmt.py` (`FREEDOMNAS_KEYMGMT`) | `keymgmt_py.py` | `keymgmt_native.py` | `nim/src/fnas/keymgmt.nim` | `tests/test_keymgmt_parity.py` |
 
 Every one of these backend switches follows `FREEDOMNAS_ENGINE` when its
 own variable is unset. Scheduled snapshots and the shadow copy are also
 what make `freedomnas snapshot-run <interval>` and `freedomnas shadow-sync`
-possible with no Python interpreter at all — reconcile has no such native
-CLI command (it stays reachable only through `python -m freedomnas
-reconcile`, per the "still needs Python" note above), but under
-`FREEDOMNAS_ENGINE=native` that command's diff/apply logic runs in Nim too.
+possible with no Python interpreter at all — reconcile and keymgmt have no
+such native CLI command (both stay reachable only through
+`python -m freedomnas reconcile` / `unlock-pools`, per the "still needs
+Python" note above), but under `FREEDOMNAS_ENGINE=native` their own
+logic — diff/apply, scrypt+AES-256-GCM wrapping, keyslot I/O, USB/TTY
+unlock — runs in Nim too.
 
 Unlike the other three, `reconcile_native.py`'s public surface is narrower
 than the reference: it implements `reconcile()` alone. `compute_diff` and
@@ -98,6 +111,17 @@ freedomnas-webui and freedomnas-installer), so `tests/test_reconcile.py`
 exercises them white-box against `reconcile_py` specifically, while
 `tests/test_reconcile_parity.py` compares the two backends' `reconcile()`
 output end to end.
+
+`keymgmt.py` carries a stricter requirement than "behaves the same": a
+keyslot file one backend writes has to open with the other, since a pool
+created under one build and booted under the other is ordinary, not an
+edge case. It wraps with two different, independent implementations of
+the same public standards — Python's `hashlib.scrypt` + `cryptography`'s
+`AESGCM` versus Nim's `nimcrypto` scrypt (RFC 7914) and AES-256-GCM
+(NIST SP 800-38D) — cross-checked byte-for-byte in
+`tests/test_keymgmt_parity.py`, including writing a keyslot with one
+backend and reading it back with the other, and the TTY passphrase prompt
+against a real pty.
 
 ## Quick Usage
 
