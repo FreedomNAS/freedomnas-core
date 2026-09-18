@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import time
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,9 @@ _SCRYPT_MAXMEM = 64 * 1024 * 1024  # headroom above the 128*N*r requirement belo
 _KEY_LEN = 32   # AES-256 raw ZFS key length
 _SALT_LEN = 16
 _NONCE_LEN = 12
+
+
+_TIMED_OUT = object()
 
 
 class KeyManagementError(Exception):
@@ -299,9 +303,9 @@ class PoolUnlocker:
                 )
                 tty_out.flush()
 
-                passphrase = self._read_line_no_echo(tty_in, tty_out)
-                if passphrase is None:
-                    break  # EOF -- tty closed / detached
+                passphrase = self._read_line_no_echo(tty_in, tty_out, deadline)
+                if passphrase is None or passphrase is _TIMED_OUT:
+                    break  # EOF (tty closed / detached), or nobody answered in time
                 if not passphrase:
                     continue
 
@@ -326,23 +330,42 @@ class PoolUnlocker:
             tty_out.close()
 
     @staticmethod
-    def _read_line_no_echo(tty_in, tty_out) -> Optional[str]:
-        """Read one line from an explicit tty file object with local echo disabled."""
+    def _read_line_no_echo(tty_in, tty_out, deadline: float):
+        """
+        Read one line from an explicit tty file object with local echo
+        disabled, waiting no later than `deadline` (a time.monotonic() value).
+
+        Returns the line, None on EOF, or _TIMED_OUT. The wait has to be
+        bounded here and not only between attempts: a console nobody sits at
+        never sends a newline, and a blocking read would hold the boot there
+        for good instead of failing open.
+        """
         import termios
 
         fd = tty_in.fileno()
         old_settings = termios.tcgetattr(fd)
         new_settings = termios.tcgetattr(fd)
         new_settings[3] &= ~termios.ECHO
+        data = b""
         try:
             termios.tcsetattr(fd, termios.TCSANOW, new_settings)
-            line = tty_in.readline()
+            while not data.endswith(b"\n"):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return _TIMED_OUT
+                ready, _, _ = select.select([fd], [], [], remaining)
+                if not ready:
+                    return _TIMED_OUT
+                chunk = os.read(fd, 1024)
+                if not chunk:
+                    break
+                data += chunk
         finally:
             termios.tcsetattr(fd, termios.TCSANOW, old_settings)
             tty_out.write("\n")
-        if line == "":
+        if not data:
             return None
-        return line.rstrip("\n")
+        return data.decode("utf-8", errors="replace").rstrip("\n")
 
     # ---- shared: load an unwrapped raw key into the pool ------------------
 

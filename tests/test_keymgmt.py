@@ -280,6 +280,39 @@ def test_tty_unlock_gives_up_on_eof(paths):
     assert result["ok"] is False
 
 
+def test_tty_unlock_gives_up_when_nobody_answers(paths):
+    """
+    A console nobody sits at sends nothing at all — no newline, no EOF.
+    The prompt has to fail open when the timeout runs out, not wait for a
+    line that will never come: firstboot.sh is blocked behind it.
+    """
+    engine = FakeEngine()
+    keymgmt.KeyslotStore("tank").set_slot(
+        "passphrase", keymgmt.wrap_key(os.urandom(32), b"correct")
+    )
+    unlocker = keymgmt.PoolUnlocker(engine)
+
+    master_fd, slave_fd = pty.openpty()
+    slave_path = os.ttyname(slave_fd)
+    result = {}
+
+    def run():
+        start = time.monotonic()
+        result["ok"] = unlocker.try_tty_unlock("tank", slave_path, timeout=2)
+        result["elapsed"] = time.monotonic() - start
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+
+    os.close(master_fd)
+    os.close(slave_fd)
+    assert not thread.is_alive(), "the prompt ignored its timeout"
+    assert result["ok"] is False
+    assert result["elapsed"] < 6
+    assert not any(c == "zfs" and a == "load_key_file" for c, a, _ in engine.calls)
+
+
 def test_tty_unlock_with_no_passphrase_keyslot(paths):
     engine = FakeEngine()
     unlocker = keymgmt.PoolUnlocker(engine)

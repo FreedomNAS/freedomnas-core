@@ -26,7 +26,7 @@
 ## since Nim's hex decoder does not reproduce CPython's ValueError wording
 ## character for character. It still raises, and unlock still fails safe.
 
-import std/[json, monotimes, options, os, posix, strutils, tables, times]
+import std/[json, monotimes, os, posix, strutils, tables, times]
 import posix/termios
 import nimcrypto/[bcmode, rijndael, scrypt]
 import nimcrypto/sysrand as ncsysrand
@@ -338,35 +338,57 @@ proc tryUsbUnlock*(eng: Engine, poolName: string,
 # TTY passphrase fallback
 # ---------------------------------------------------------------------------
 
-proc readLineNoEcho(fdIn, fdOut: cint): Option[string] =
-  ## Read one line from an explicit tty fd with local echo disabled.
-  ## None means EOF (tty closed/detached) before anything was read.
+type
+  ReadOutcome = enum
+    roLine, roEof, roTimedOut
+
+proc readLineNoEcho(fdIn, fdOut: cint, deadline: MonoTime): (ReadOutcome, string) =
+  ## Read one line from an explicit tty fd with local echo disabled, waiting
+  ## no later than `deadline`. A console nobody sits at never sends a
+  ## newline: the wait has to be bounded here, not only between attempts,
+  ## or the boot hangs instead of failing open.
   var oldSettings, newSettings: Termios
   discard tcGetAttr(fdIn, addr oldSettings)
   newSettings = oldSettings
   newSettings.c_lflag = newSettings.c_lflag and not ECHO
   discard tcSetAttr(fdIn, TCSANOW, addr newSettings)
 
-  var line = ""
-  var buf: array[1, char]
-  var eof = false
-  while true:
-    let n = posix.read(fdIn, addr buf[0], 1)
-    if n <= 0:
-      eof = true
-      break
-    if buf[0] == '\n':
-      break
-    line.add buf[0]
+  var
+    line = ""
+    outcome = roLine
+    buf: array[1024, char]
+  block reading:
+    while line.len == 0 or line[^1] != '\n':
+      let remaining = (deadline - getMonoTime()).inMilliseconds
+      if remaining <= 0:
+        outcome = roTimedOut
+        break reading
+      var pfd = TPollfd(fd: fdIn, events: POLLIN, revents: 0)
+      let ready = poll(addr pfd, 1, cint(remaining))
+      if ready < 0:
+        if errno == EINTR: continue
+        outcome = roEof
+        break reading
+      if ready == 0:
+        outcome = roTimedOut
+        break reading
+      let n = posix.read(fdIn, addr buf[0], buf.len)
+      if n <= 0:
+        break reading
+      for i in 0 ..< n:
+        line.add buf[i]
 
   discard tcSetAttr(fdIn, TCSANOW, addr oldSettings)
   let newline = "\n"
   discard posix.write(fdOut, newline.cstring, newline.len)
 
-  if eof and line.len == 0:
-    none(string)
-  else:
-    some(line)
+  if outcome == roTimedOut:
+    return (roTimedOut, "")
+  if line.len == 0:
+    return (roEof, "")
+  if line[^1] == '\n':
+    line.setLen(line.len - 1)
+  (roLine, line)
 
 proc tryTtyUnlock*(eng: Engine, poolName, ttyPath: string, timeout: int,
                    keyslotDir = "", runtimeKeyDir = ""): bool =
@@ -400,10 +422,9 @@ proc tryTtyUnlock*(eng: Engine, poolName, ttyPath: string, timeout: int,
                 "Enter Master Passphrase to unlock (giving up in " & $remaining & "s): "
     discard posix.write(fdOut, prompt.cstring, prompt.len)
 
-    let lineOpt = readLineNoEcho(fdIn, fdOut)
-    if lineOpt.isNone:
+    let (outcome, passphrase) = readLineNoEcho(fdIn, fdOut, deadline)
+    if outcome != roLine:
       break
-    let passphrase = lineOpt.get
     if passphrase.len == 0:
       continue
 

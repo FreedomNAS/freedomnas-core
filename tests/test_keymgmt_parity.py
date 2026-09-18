@@ -238,7 +238,18 @@ def run_tty_unlock(unlocker, pool_name, feed, timeout=10):
     for chunk, delay in feed:
         os.write(master_fd, chunk)
         time.sleep(delay)
-    os.waitpid(pid, 0)
+
+    # Bounded: a prompt that ignores its timeout must fail this test, not
+    # hang the whole suite.
+    limit = time.monotonic() + timeout + 10
+    while os.waitpid(pid, os.WNOHANG) == (0, 0):
+        if time.monotonic() > limit:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            os.close(master_fd)
+            os.close(read_fd)
+            return "hung"
+        time.sleep(0.05)
     raw = os.read(read_fd, 1)
     os.close(master_fd)
     os.close(read_fd)
@@ -280,6 +291,22 @@ def test_tty_unlock_eof_matches(backend_pair):
     )
     assert py_result is False
     assert native_result is False
+
+
+def test_tty_unlock_timeout_matches(backend_pair):
+    """Nothing typed at all: both give up after the timeout instead of waiting."""
+    (py_engine, py_mod, py_keyslots, *_), \
+        (native_engine, native_mod, native_keyslots, *_) = backend_pair()
+
+    slot = py_mod.wrap_key(os.urandom(32), b"secret")
+    py_mod.KeyslotStore("tank", base_dir=py_keyslots).set_slot("passphrase", slot)
+    native_mod.KeyslotStore("tank", base_dir=native_keyslots).set_slot("passphrase", slot)
+
+    for mod, engine in ((py_mod, py_engine), (native_mod, native_engine)):
+        start = time.monotonic()
+        result = run_tty_unlock(mod.PoolUnlocker(engine), "tank", [], timeout=2)
+        assert result is False, f"{mod.__name__}: {result}"
+        assert time.monotonic() - start < 8
 
 
 # ---------------------------------------------------------------------------
