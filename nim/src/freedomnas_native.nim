@@ -2,6 +2,7 @@ import std/[json, locks, tables]
 import nimpy
 import fnas/[engine, errors, osdetect, pyformat, pyyaml, shlexutil, yamlvalue]
 import fnas/config as fnasconfig
+import fnas/snapshots as fnassnapshots
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -188,3 +189,18 @@ proc config_validate(valueJson: string): string {.exportpy.} =
 proc config_header(valueJson, now: string): string {.exportpy.} =
   guarded:
     $(%*{"value": fnasconfig.header(fromJson(parseJson(valueJson)), now)})
+
+# ---------------------------------------------------------------------------
+# Scheduled snapshots
+# ---------------------------------------------------------------------------
+
+proc snapshot_run(handle: int, policiesJson, interval, nowIso: string): string {.exportpy.} =
+  guarded:
+    let
+      policies = parseJson(policiesJson)
+      asOf = fnassnapshots.parseNow(nowIso)
+      eng = lookup(handle)
+    var results: JsonNode
+    withoutGil:
+      results = fnassnapshots.runInterval(eng, policies, interval, asOf)
+    $(%*{"value": results})

@@ -58,10 +58,29 @@ FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
 ```
 
 `nimble cli` builds `nim/freedomnas`, the native CLI: `status`, `check`,
-`config show|check|path` and `version`, with no interpreter involved.
-What still needs Python is everything built on the keyslots or the module
-runtime — `reconcile`, `unlock-pools`, `serve` — through
-`python -m freedomnas`.
+`config show|check|path`, `snapshot-run <interval>` and `version`, with no
+interpreter involved. What still needs Python is everything built on the
+keyslots or the module runtime — `reconcile`, `unlock-pools`, `serve` —
+through `python -m freedomnas`.
+
+### Three implementations, same pattern
+
+Scheduled snapshots (`snapshots.py`) follow the same split as the engine
+and the configuration manager:
+
+| File | What it is |
+|------|-----------|
+| `snapshots.py` | Backend switch — `FREEDOMNAS_SNAPSHOTS`, following `FREEDOMNAS_ENGINE` when unset |
+| `snapshots_py.py` | The scheduler in pure Python — the reference implementation |
+| `snapshots_native.py` | The Python side of the Nim scheduler: calls the native engine's handle directly |
+| `nim/src/fnas/snapshots.nim` | The scheduling logic itself — naming, listing "ours", pruning |
+
+`tests/test_snapshots_parity.py` holds the two to identical behaviour,
+against a throwaway "zfs" profile whose snapshot actions read and write a
+plain file instead of talking to real ZFS. The native scheduler only makes
+sense paired with the native engine — it calls `engine._handle` directly —
+which is also what makes `freedomnas snapshot-run <interval>` possible with
+no Python interpreter at all.
 
 ## Quick Usage
 

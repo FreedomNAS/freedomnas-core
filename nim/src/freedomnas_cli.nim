@@ -2,13 +2,14 @@
 ##
 ## It answers what the engine and the configuration can answer without an
 ## interpreter: which edition and init system were detected, whether the
-## profiles load, and what config.yaml holds. The commands that still need
-## the keyslots or the module runtime — reconcile, unlock-pools, serve —
-## live in `python -m freedomnas`.
+## profiles load, what config.yaml holds, and scheduled snapshots. The
+## commands that still need the keyslots or the module runtime — reconcile,
+## unlock-pools, serve — live in `python -m freedomnas`.
 
-import std/[json, os, parseopt, strutils, tables]
+import std/[json, os, parseopt, strutils, tables, times]
 import fnas/[engine, errors, osdetect, pyyaml, yamlvalue]
 import fnas/config as fnasconfig
+import fnas/snapshots as fnassnapshots
 
 const
   ProfileCandidates = [
@@ -24,6 +25,7 @@ Usage:
   freedomnas status  [--profile-dir DIR] [--os EDITION]
   freedomnas check   [--profile-dir DIR] [--os EDITION]
   freedomnas config  [show|check|path] [--config FILE]
+  freedomnas snapshot-run <hourly|daily|weekly|monthly> [--profile-dir DIR] [--os EDITION] [--config FILE]
   freedomnas version
 
 Environment:
@@ -108,6 +110,33 @@ proc cmdConfig(action, explicitPath: string): int =
     stderr.writeLine "Unknown config action: " & action
     2
 
+proc cmdSnapshotRun(dir, osOverride, explicitConfigPath, interval: string): int =
+  if interval.len == 0:
+    stderr.writeLine "Usage: freedomnas snapshot-run <hourly|daily|weekly|monthly>"
+    return 2
+
+  let
+    eng = openEngine(dir, osOverride)
+    config = fnasconfig.loadFile(configPath(explicitConfigPath))
+    policies = toJson(config.getPath("snapshots.policies"))
+    results = fnassnapshots.runInterval(eng, policies, interval, times.now())
+
+  if results.len == 0:
+    echo "No dataset asks for ", interval, " snapshots."
+    return 0
+
+  var failed = 0
+  for r in results:
+    if r["error"].kind != JNull:
+      inc failed
+      stderr.writeLine "FAIL  " & r["dataset"].getStr & ": " & r["error"].getStr
+      continue
+    let destroyed = r["destroyed"].len
+    let pruned = if destroyed > 0: ", pruned " & $destroyed else: ""
+    echo "OK  ", r["created"].getStr, pruned
+
+  if failed > 0: 1 else: 0
+
 proc main(): int =
   var
     command = ""
@@ -161,6 +190,7 @@ proc main(): int =
     of "status": result = cmdStatus(dir, osOverride)
     of "check": result = cmdCheck(dir, osOverride)
     of "config": result = cmdConfig(action, configFile)
+    of "snapshot-run": result = cmdSnapshotRun(dir, osOverride, configFile, action)
     of "version": echo "freedomnas-core 4.0.0 (native)"
     of "": echo Usage; result = 2
     else:
