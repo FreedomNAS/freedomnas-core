@@ -438,7 +438,9 @@ class ReconciliationEngine:
         current_groups: Set[str] = set(old_user.get("groups", []))
         results: List[ActionResult] = []
 
-        for group in desired_groups - current_groups:
+        # Sorted: a set's order changes with every interpreter, and the log and
+        # the results should not.
+        for group in sorted(desired_groups - current_groups):
             params = {"username": username, "group": group}
             try:
                 self.engine.execute("users", "add_to_group", username=username, group=group)
@@ -448,7 +450,7 @@ class ReconciliationEngine:
                 logger.error("Failed to add %s to group %s: %s", username, group, exc)
                 results.append(ActionResult(action="users.add_to_group", params=params, target_state="failed", error=str(exc)))
 
-        for group in current_groups - desired_groups:
+        for group in sorted(current_groups - desired_groups):
             params = {"username": username, "group": group}
             try:
                 self.engine.execute("users", "remove_from_group", username=username, group=group)

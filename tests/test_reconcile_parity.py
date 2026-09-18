@@ -83,13 +83,16 @@ class FakeConfig:
 def backend_pair(tmp_path):
     """Two (ReconciliationEngine, ) instances, each with its own fake OS state."""
 
+    builds = []
+
     def build(state, imported_pools=(), existing_users=(), nfs_shares=None, failing=()):
+        builds.append(None)
         pairs = {}
         for name, engine_mod, reconcile_mod in [
             ("py", engine_py, reconcile_py),
             ("native", engine_native, reconcile_native),
         ]:
-            root = tmp_path / name
+            root = tmp_path / f"{name}-{len(builds)}"
             (root / "os").mkdir(parents=True)
             pools_state = root / "pools.state"
             pools_state.write_text("\n".join(imported_pools) + "\n" if imported_pools else "")
@@ -304,3 +307,32 @@ def test_known_divergence_on_malformed_entries(desired):
     with pytest.raises((KeyError, TypeError, AttributeError)):
         py.compute_diff(desired, {})
     assert isinstance(native.compute_diff(desired, {}), list)
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_reconcile_matches_on_random_states_in_order(backend_pair, tmp_path, seed):
+    """
+    End to end over random current/desired pairs, users with several groups
+    included, comparing results *in order*. Group changes are applied in
+    sorted order by both engines; a Python set's order changes with every
+    interpreter, which used to make this comparison flaky.
+    """
+    rng = random.Random(seed)
+    failable = ["hostname_set", "users.create", "add_to_group", "create_share", "export_add"]
+    for index in range(40):
+        state = random_state(rng)
+        mode = rng.choice(["hybrid", "declarative", "disaster_recovery"])
+        desired_path = None
+        if mode == "hybrid" and rng.random() < .8:
+            desired_path = tmp_path / f"desired-{seed}-{index}.yaml"
+            desired_path.write_text(yaml.safe_dump(random_state(rng)))
+        py, native = backend_pair(
+            state,
+            imported_pools=rng.sample(["tank", "rpool", "data"], rng.randint(0, 3)),
+            existing_users=rng.sample(NAMES, rng.randint(0, 4)),
+            failing=rng.sample(failable, rng.choice([0, 0, 1])),
+        )
+        path = str(desired_path) if desired_path else None
+        assert outcome(py.reconcile, path, mode) == outcome(native.reconcile, path, mode), (
+            mode, state, desired_path.read_text() if desired_path else None,
+        )

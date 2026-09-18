@@ -12,7 +12,7 @@
 ##                        (hostname -> timezone -> pools -> users -> services
 ##                        -> shares)
 
-import std/[json, sets, strutils, tables]
+import std/[algorithm, json, sequtils, sets, strutils, tables]
 import ./engine
 import ./errors
 import ./pyyaml
@@ -224,12 +224,12 @@ proc doUserModify(eng: Engine, user, oldUser: JsonNode): seq[JsonNode] =
     for g in oldUser{"groups"}.items:
       if g.kind == JString: currentGroups.incl g.getStr
 
-  for group in (desiredGroups - currentGroups):
+  for group in sorted(toSeq(desiredGroups - currentGroups)):
     let params = %*{"username": username, "group": group}
     result.add runAction(eng, "users.add_to_group", params, "users", "add_to_group",
                          {"username": username, "group": group}.toTable)
 
-  for group in (currentGroups - desiredGroups):
+  for group in sorted(toSeq(currentGroups - desiredGroups)):
     let params = %*{"username": username, "group": group}
     result.add runAction(eng, "users.remove_from_group", params, "users", "remove_from_group",
                          {"username": username, "group": group}.toTable)
