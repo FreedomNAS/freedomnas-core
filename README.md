@@ -76,14 +76,12 @@ everything built on the keyslots or the module runtime — `reconcile`,
 
 Scheduled snapshots (`snapshots.py`), pool composition (`pools.py`), the
 configuration's shadow copy (`shadow.py`), the reconciliation engine
-(`reconcile.py`) and encrypted-pool key management (`keymgmt.py`) follow
-the same split as the engine and the configuration manager. Every native
-side calls the engine's native handle directly — `engine._handle` — so
-none of them makes sense without the native engine, and all five are held
-to the pure-Python behaviour by a parity test against a throwaway
-"zfs"/system/users/samba/nfs/services/media profile whose actions read and
-write a plain file — or are plain no-ops — instead of talking to the real
-OS:
+(`reconcile.py`), encrypted-pool key management (`keymgmt.py`) and the
+package manager (`package_manager.py`) follow the same split as the engine
+and the configuration manager. Every native side but one calls the
+engine's native handle directly — `engine._handle` — so none of those
+makes sense without the native engine; all six are held to the
+pure-Python behaviour by a parity test:
 
 | Module | Backend switch | Pure Python | Native Python side | Nim logic | Parity test |
 |--------|----------------|-------------|---------------------|-----------|-------------|
@@ -92,6 +90,7 @@ OS:
 | Configuration's shadow copy | `shadow.py` (`FREEDOMNAS_SHADOW`) | `shadow_py.py` | `shadow_native.py` | `nim/src/fnas/shadow.nim` | `tests/test_shadow_parity.py` |
 | Reconciliation engine | `reconcile.py` (`FREEDOMNAS_RECONCILE`) | `reconcile_py.py` | `reconcile_native.py` | `nim/src/fnas/reconcile.nim` | `tests/test_reconcile_parity.py` |
 | Encrypted-pool keyslots | `keymgmt.py` (`FREEDOMNAS_KEYMGMT`) | `keymgmt_py.py` | `keymgmt_native.py` | `nim/src/fnas/keymgmt.nim` | `tests/test_keymgmt_parity.py` |
+| Package manager | `package_manager.py` (`FREEDOMNAS_PACKAGES`) | `package_manager_py.py` | `package_manager_native.py` | `nim/src/fnas/packages.nim` | `tests/test_package_manager_parity.py` |
 
 Every one of these backend switches follows `FREEDOMNAS_ENGINE` when its
 own variable is unset. Scheduled snapshots and the shadow copy are also
@@ -102,6 +101,15 @@ such native CLI command (both stay reachable only through
 Python" note above), but under `FREEDOMNAS_ENGINE=native` their own
 logic — diff/apply, scrypt+AES-256-GCM wrapping, keyslot I/O, USB/TTY
 unlock — runs in Nim too.
+
+The package manager is the one exception to "every native side calls the
+engine's handle": it never calls `engine.execute()` at all — MANIFEST.json
+and category JSON reading is pure, read-only navigation — so it needs no
+engine handle and works under either engine backend, or with none open
+yet. Its parity test runs against the real `freedomnas-profiles/packages/`
+tree rather than a throwaway fixture, for the same reason
+`tests/test_package_manager.py`'s pure-Python baseline does: the manifest
+and category shape is the contract being tested, not a stand-in for it.
 
 Unlike the other three, `reconcile_native.py`'s public surface is narrower
 than the reference: it implements `reconcile()` alone. `compute_diff` and

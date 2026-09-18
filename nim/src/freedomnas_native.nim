@@ -7,6 +7,7 @@ import fnas/pools as fnaspools
 import fnas/shadow as fnasshadow
 import fnas/reconcile as fnasreconcile
 import fnas/keymgmt as fnaskeymgmt
+import fnas/packages as fnaspackages
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -30,7 +31,12 @@ var
   engines: Table[int, Engine]
   nextHandle: int
 
+  pkgManagersLock: Lock
+  pkgManagers: Table[int, PackageManager]
+  nextPkgHandle: int
+
 initLock(enginesLock)
+initLock(pkgManagersLock)
 
 proc errorPayload(kind: ErrorKind, message: string): string =
   $(%*{"error": {"kind": $kind, "message": message}})
@@ -48,6 +54,12 @@ proc lookup(handle: int): Engine =
     if handle notin engines:
       raiseFnas(ekEngine, "Unknown engine handle: " & $handle)
     result = engines[handle]
+
+proc lookupPkg(handle: int): PackageManager =
+  withLock pkgManagersLock:
+    if handle notin pkgManagers:
+      raiseFnas(ekEngine, "Unknown package manager handle: " & $handle)
+    result = pkgManagers[handle]
 
 proc parseValues(valuesJson: string): (Table[string, string], Table[string, string]) =
   let node = parseJson(valuesJson)
@@ -351,3 +363,65 @@ proc keymgmt_create_encrypted_pool(handle: int, poolName, vdevType, devices, mas
                                       usbDevices, ashift, compression,
                                       keyslotDir, runtimeKeyDir, usbMountpoint)
     $(%*{"value": true})
+
+# ---------------------------------------------------------------------------
+# Package manager — reads freedomnas-profiles/packages/
+# ---------------------------------------------------------------------------
+
+proc package_manager_create(packagesDir: string): string {.exportpy.} =
+  guarded:
+    let pm = fnaspackages.newPackageManager(packagesDir)
+    var handle: int
+    withLock pkgManagersLock:
+      handle = nextPkgHandle
+      inc nextPkgHandle
+      pkgManagers[handle] = pm
+    $(%*{"handle": handle})
+
+proc package_manager_release(handle: int) {.exportpy.} =
+  withLock pkgManagersLock:
+    pkgManagers.del(handle)
+
+proc package_manager_categories(handle: int): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getCategories(lookupPkg(handle))})
+
+proc package_manager_category_info(handle: int, categoryId: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getCategoryInfo(lookupPkg(handle), categoryId)})
+
+proc package_manager_packages(handle: int, categoryId, edition, initSystem: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getPackagesForOs(lookupPkg(handle), categoryId, edition, initSystem)})
+
+proc package_manager_pkgbuilds(handle: int, categoryId, edition, initSystem: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getPkgbuildsForOs(lookupPkg(handle), categoryId, edition, initSystem)})
+
+proc package_manager_services(handle: int, categoryId, edition, initSystem: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getServicesForOs(lookupPkg(handle), categoryId, edition, initSystem)})
+
+proc package_manager_early_services(handle: int, categoryId, edition, initSystem: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getEarlyServicesForOs(lookupPkg(handle), categoryId, edition, initSystem)})
+
+proc package_manager_config_paths(handle: int, categoryId, edition: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getConfigPaths(lookupPkg(handle), categoryId, edition)})
+
+proc package_manager_required_categories(handle: int): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getRequiredCategories(lookupPkg(handle))})
+
+proc package_manager_optional_categories(handle: int): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.getOptionalCategories(lookupPkg(handle))})
+
+proc package_manager_validate_category(handle: int, categoryId: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.validateCategory(lookupPkg(handle), categoryId)})
+
+proc package_manager_validate_edition(handle: int, edition: string): string {.exportpy.} =
+  guarded:
+    $(%*{"value": fnaspackages.validateEdition(lookupPkg(handle), edition)})
