@@ -362,3 +362,29 @@ def test_create_encrypted_pool_writes_usb_devices(paths, tmp_path):
     slot = keymgmt.KeyslotStore("tank").get_slot("usb")
     raw_key = keymgmt.unwrap_key(slot, written)
     assert len(raw_key) == 32
+
+
+# ---------------------------------------------------------------------------
+# Writing and removing key files
+# ---------------------------------------------------------------------------
+
+def test_key_files_are_written_whole_even_one_byte_at_a_time(paths, monkeypatch):
+    real_write = os.write
+    monkeypatch.setattr(keymgmt.os, "write", lambda fd, data: real_write(fd, bytes(data[:1])))
+    raw_key = os.urandom(32)
+
+    keyfile = keymgmt._write_transient_keyfile("tank", raw_key)
+
+    assert keyfile.read_bytes() == raw_key
+
+
+def test_shred_removes_the_key_even_when_it_cannot_overwrite_it(tmp_path):
+    keyfile = tmp_path / "tank.key"
+    keyfile.write_bytes(os.urandom(32))
+    keyfile.chmod(0o400)
+    if os.geteuid() == 0:
+        pytest.skip("root can open a read-only file for writing")
+
+    keymgmt._shred(keyfile)
+
+    assert not keyfile.exists()

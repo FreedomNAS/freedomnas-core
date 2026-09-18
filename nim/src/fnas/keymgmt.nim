@@ -30,6 +30,7 @@ import std/[json, monotimes, os, posix, strutils, tables, times]
 import posix/termios
 import nimcrypto/[bcmode, rijndael, scrypt]
 import nimcrypto/sysrand as ncsysrand
+from nimcrypto/utils import burnArray
 import ./engine
 import ./errors
 
@@ -57,6 +58,24 @@ proc genRandomBytes(n: int): seq[byte] =
   result = newSeq[byte](n)
   if n > 0 and ncsysrand.randomBytes(result) != n:
     raiseFnas(ekOsError, "Could not read " & $n & " random bytes from the system")
+
+proc wipe(data: var seq[byte]) =
+  ## Zero key material before the memory goes back to the allocator.
+  burnArray(data)
+
+proc wipe(data: var string) =
+  burnArray(data)
+
+proc writeAll(fd: cint, data: openArray[byte], path: string) =
+  ## write() may take less than it was given; a key cut short would load
+  ## as a different key, or not at all.
+  var offset = 0
+  while offset < data.len:
+    let n = posix.write(fd, unsafeAddr data[offset], data.len - offset)
+    if n < 0:
+      if errno == EINTR: continue
+      raiseFnas(ekOsError, "[Errno " & $errno & "] " & $strerror(errno) & ": '" & path & "'")
+    offset += n
 
 proc toBytes(s: string): seq[byte] =
   result = newSeq[byte](s.len)
@@ -96,12 +115,14 @@ proc deriveWrappingKey(secret, salt: seq[byte]): seq[byte] =
   var b = newSeq[byte](bLen)
   result = newSeq[byte](KeyLen)
   discard scrypt(secret, salt, ScryptN, ScryptR, ScryptP, xyv, b, result)
+  burnArray(xyv)
+  wipe(b)
 
 proc wrapKey*(rawKey, secret: seq[byte]): JsonNode =
   ## Wrap rawKey so it can only be recovered with the given secret.
   let salt = genRandomBytes(SaltLen)
   let nonce = genRandomBytes(NonceLen)
-  let wrappingKey = deriveWrappingKey(secret, salt)
+  var wrappingKey = deriveWrappingKey(secret, salt)
 
   var ctx: GCM[aes256]
   ctx.init(wrappingKey, nonce, [])
@@ -109,6 +130,7 @@ proc wrapKey*(rawKey, secret: seq[byte]): JsonNode =
   var tag: array[GcmTagLen, byte]
   ctx.encrypt(rawKey, ciphertext, tag)
   ctx.clear()
+  wipe(wrappingKey)
 
   result = newJObject()
   result["salt"] = %toHexStr(salt)
@@ -138,7 +160,7 @@ proc unwrapKey*(slot: JsonNode, secret: seq[byte]): seq[byte] =
   if combined.len < GcmTagLen:
     raiseFnas(ekKeyMgmt, "Wrong secret or corrupted keyslot")
 
-  let wrappingKey = deriveWrappingKey(secret, salt)
+  var wrappingKey = deriveWrappingKey(secret, salt)
   let ciphertext = combined[0 ..< combined.len - GcmTagLen]
   let tag = combined[combined.len - GcmTagLen ..< combined.len]
 
@@ -147,8 +169,10 @@ proc unwrapKey*(slot: JsonNode, secret: seq[byte]): seq[byte] =
   var plaintext = newSeq[byte](ciphertext.len)
   let ok = ctx.decrypt(ciphertext, plaintext, tag)
   ctx.clear()
+  wipe(wrappingKey)
 
   if not ok:
+    wipe(plaintext)
     raiseFnas(ekKeyMgmt, "Wrong secret or corrupted keyslot")
   plaintext
 
@@ -215,23 +239,29 @@ proc writeTransientKeyfile(poolName: string, rawKey: seq[byte], baseDir = ""): s
   if fd < 0:
     raiseFnas(ekKeyMgmt, "Could not open keyfile: " & result)
   try:
-    if rawKey.len > 0:
-      discard posix.write(fd, unsafeAddr rawKey[0], rawKey.len)
+    writeAll(fd, rawKey, result)
   finally:
     discard posix.close(fd)
 
 proc shred(path: string) =
+  ## Overwrite, then unlink — and unlink even if the overwrite failed: a
+  ## raw key left in /run is worse than one removed without being scrubbed.
   try:
     let size = getFileSize(path)
     if size > 0:
-      let junk = genRandomBytes(int(size))
+      var junk = genRandomBytes(int(size))
       let fd = posix.open(path.cstring, O_WRONLY)
       if fd >= 0:
-        discard posix.write(fd, unsafeAddr junk[0], junk.len)
-        discard posix.fsync(fd)
-        discard posix.close(fd)
+        try:
+          writeAll(fd, junk, path)
+          discard posix.fsync(fd)
+        finally:
+          discard posix.close(fd)
+  except CatchableError:
+    discard
+  try:
     removeFile(path)
-  except OSError, IOError:
+  except CatchableError:
     discard
 
 # ---------------------------------------------------------------------------
@@ -290,7 +320,9 @@ proc readUsbKey(eng: Engine, device, mountpoint: string): seq[byte] =
     let keyPath = mp / UsbKeyFilename
     if not fileExists(keyPath):
       return @[]
-    toBytes(readFile(keyPath))
+    var content = readFile(keyPath)
+    result = toBytes(content)
+    wipe(content)
   finally:
     try:
       discard eng.execute("media", "unmount", {"mountpoint": mp}.toTable,
@@ -323,14 +355,19 @@ proc tryUsbUnlock*(eng: Engine, poolName: string,
     return false
 
   for device in listRemovableDevices(eng):
-    let keyBytes = readUsbKey(eng, device, usbMountpoint)
+    var keyBytes = readUsbKey(eng, device, usbMountpoint)
     if keyBytes.len == 0: continue
     var rawKey: seq[byte]
     try:
       rawKey = unwrapKey(slot, keyBytes)
     except FnasError:
+      wipe(keyBytes)
       continue
-    return loadRawKey(eng, poolName, rawKey, runtimeKeyDir)
+    wipe(keyBytes)
+    try:
+      return loadRawKey(eng, poolName, rawKey, runtimeKeyDir)
+    finally:
+      wipe(rawKey)
 
   false
 
@@ -378,6 +415,7 @@ proc readLineNoEcho(fdIn, fdOut: cint, deadline: MonoTime): (ReadOutcome, string
       for i in 0 ..< n:
         line.add buf[i]
 
+  burnArray(buf)
   discard tcSetAttr(fdIn, TCSANOW, addr oldSettings)
   let newline = "\n"
   discard posix.write(fdOut, newline.cstring, newline.len)
@@ -422,21 +460,29 @@ proc tryTtyUnlock*(eng: Engine, poolName, ttyPath: string, timeout: int,
                 "Enter Master Passphrase to unlock (giving up in " & $remaining & "s): "
     discard posix.write(fdOut, prompt.cstring, prompt.len)
 
-    let (outcome, passphrase) = readLineNoEcho(fdIn, fdOut, deadline)
+    var (outcome, passphrase) = readLineNoEcho(fdIn, fdOut, deadline)
     if outcome != roLine:
       break
     if passphrase.len == 0:
       continue
 
-    var rawKey: seq[byte]
+    var
+      rawKey: seq[byte]
+      secret = toBytes(passphrase)
+    wipe(passphrase)
     try:
-      rawKey = unwrapKey(slot, toBytes(passphrase))
+      rawKey = unwrapKey(slot, secret)
     except FnasError:
+      wipe(secret)
       let wrong = "Incorrect passphrase.\n"
       discard posix.write(fdOut, wrong.cstring, wrong.len)
       continue
+    wipe(secret)
 
-    return loadRawKey(eng, poolName, rawKey, runtimeKeyDir)
+    try:
+      return loadRawKey(eng, poolName, rawKey, runtimeKeyDir)
+    finally:
+      wipe(rawKey)
 
   let timedOut = "\nFreedomNAS: timed out waiting for the Master Passphrase for '" &
                 poolName & "'.\n" &
@@ -460,8 +506,8 @@ proc writeUsbKey(eng: Engine, device: string, keyBytes: seq[byte], mountpoint: s
     if fd < 0:
       raiseFnas(ekKeyMgmt, "Could not open " & keyPath)
     try:
-      if keyBytes.len > 0:
-        discard posix.write(fd, unsafeAddr keyBytes[0], keyBytes.len)
+      writeAll(fd, keyBytes, keyPath)
+      discard posix.fsync(fd)
     finally:
       discard posix.close(fd)
   finally:
@@ -475,8 +521,14 @@ proc createEncryptedPool*(eng: Engine, poolName, vdevType, devices, masterPassph
   ## independent unlock keyslots: one wrapped with masterPassphrase, one
   ## wrapped with a freshly generated random USB key that is written as
   ## freedomnas.key onto every device in usbDevices.
-  let rawKey = genRandomBytes(KeyLen)
-  let usbKeyBytes = genRandomBytes(KeyLen)
+  var
+    rawKey = genRandomBytes(KeyLen)
+    usbKeyBytes = genRandomBytes(KeyLen)
+    passphrase = toBytes(masterPassphrase)
+  defer:
+    wipe(rawKey)
+    wipe(usbKeyBytes)
+    wipe(passphrase)
 
   let keyfile = writeTransientKeyfile(poolName, rawKey, runtimeKeyDir)
   try:
@@ -488,7 +540,7 @@ proc createEncryptedPool*(eng: Engine, poolName, vdevType, devices, masterPassph
     shred(keyfile)
 
   let store = newKeyslotStore(poolName, keyslotDir)
-  store.setSlot("passphrase", wrapKey(rawKey, toBytes(masterPassphrase)))
+  store.setSlot("passphrase", wrapKey(rawKey, passphrase))
   store.setSlot("usb", wrapKey(rawKey, usbKeyBytes))
 
   for device in usbDevices:

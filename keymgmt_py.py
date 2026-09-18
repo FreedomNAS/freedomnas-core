@@ -444,7 +444,8 @@ class PoolProvisioner:
             key_path = USB_MOUNTPOINT / USB_KEY_FILENAME
             fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.write(fd, key_bytes)
+                _write_all(fd, key_bytes)
+                os.fsync(fd)
             finally:
                 os.close(fd)
         finally:
@@ -455,25 +456,38 @@ class PoolProvisioner:
 # Transient tmpfs keyfile helpers, shared by unlock and provisioning
 # ----------------------------------------------------------------------
 
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write may take less than it was given; a key cut short loads as another key."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 def _write_transient_keyfile(pool_name: str, raw_key: bytes) -> Path:
     RUNTIME_KEY_DIR.mkdir(parents=True, exist_ok=True)
     RUNTIME_KEY_DIR.chmod(0o700)
     keyfile = RUNTIME_KEY_DIR / f"{pool_name}.key"
     fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, raw_key)
+        _write_all(fd, raw_key)
     finally:
         os.close(fd)
     return keyfile
 
 
 def _shred(path: Path) -> None:
+    """
+    Overwrite, then unlink — and unlink even if the overwrite failed: a raw
+    key left in /run is worse than one removed without being scrubbed.
+    """
     try:
         size = path.stat().st_size
         with open(path, "r+b", buffering=0) as f:
-            f.write(secrets.token_bytes(size))
-            f.flush()
+            _write_all(f.fileno(), secrets.token_bytes(size))
             os.fsync(f.fileno())
+    except OSError:
+        pass
+    try:
         path.unlink()
     except OSError:
         pass
