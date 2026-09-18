@@ -72,3 +72,19 @@ def test_a_python_engine_handed_to_native_code_is_named_not_crashed():
     python_engine = engine_py.FreedomNASEngine.for_target("debian", profile_dir=profiles)
     with pytest.raises(TypeError, match="FREEDOMNAS_ENGINE=native"):
         engine_native.native_handle(python_engine)
+
+
+def test_the_suite_tests_this_checkout():
+    """
+    conftest.py keeps an installed freedomnas-core out of the way. If it
+    did not, the modules would catch the installed copy's exception classes
+    while the tests raise this checkout's, and results would depend on what
+    the machine happens to have installed.
+    """
+    import engine_py
+    import pools_py
+    import reconcile_py
+
+    assert pools_py.CommandExecutionError is engine_py.CommandExecutionError
+    assert reconcile_py.CommandExecutionError is engine_py.CommandExecutionError
+    assert Path(pools_py.__file__).resolve().parent == REPO.resolve()
