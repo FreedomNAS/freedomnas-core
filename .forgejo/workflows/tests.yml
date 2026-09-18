@@ -1,10 +1,12 @@
 name: tests
 
-# The suite runs twice: once on pure Python, once on Nim (FREEDOMNAS_ENGINE
-# also moves the configuration manager, since FREEDOMNAS_CONFIG follows it).
-# The parity suites are what make the second run meaningful — they ask both
-# implementations the same questions and compare the answers, the failures
-# and, for the configuration, the bytes written.
+# Every ported module has its own backend variable, following
+# FREEDOMNAS_ENGINE when unset. The suite runs on pure Python, on Nim, on
+# Nim with each module pinned back to Python in turn (the rollback path),
+# and on the Python engine with every module asking for Nim (they must
+# follow the engine back). The parity suites are what make the native runs
+# meaningful — they compare results, failures and, for what is written to
+# disk, the bytes.
 
 on:
   push:
@@ -32,11 +34,25 @@ jobs:
       - name: Build the native engine
         run: cd nim && nimble -y native
 
-      - name: Python engine and config
+      - name: Python
         run: python3 -m pytest tests/ -q
 
-      - name: Native engine and config
+      - name: Native
         run: FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
 
-      - name: Mixed — native engine, PyYAML config
-        run: FREEDOMNAS_ENGINE=native FREEDOMNAS_CONFIG=python python3 -m pytest tests/ -q
+      - name: Native engine, each module pinned back to Python
+        run: |
+          set -e
+          for module in CONFIG SNAPSHOTS POOLS SHADOW RECONCILE KEYMGMT PACKAGES; do
+            echo "--- FREEDOMNAS_ENGINE=native FREEDOMNAS_${module}=python"
+            env FREEDOMNAS_ENGINE=native "FREEDOMNAS_${module}=python" \
+              python3 -m pytest tests/ -q
+          done
+
+      - name: Python engine, every module asking for native
+        run: |
+          env FREEDOMNAS_ENGINE=python FREEDOMNAS_CONFIG=native \
+            FREEDOMNAS_SNAPSHOTS=native FREEDOMNAS_POOLS=native \
+            FREEDOMNAS_SHADOW=native FREEDOMNAS_RECONCILE=native \
+            FREEDOMNAS_KEYMGMT=native FREEDOMNAS_PACKAGES=native \
+            python3 -m pytest tests/ -q
