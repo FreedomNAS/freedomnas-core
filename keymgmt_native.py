@@ -26,6 +26,11 @@ except ImportError:
     import freedomnas_native as _native  # type: ignore[no-redef]
 
 try:
+    from freedomnas.engine_native import native_handle
+except ImportError:
+    from engine_native import native_handle  # type: ignore[no-redef]
+
+try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
     from freedomnas.keymgmt_py import (
         KEYSLOT_DIR,
@@ -99,17 +104,17 @@ class PoolUnlocker:
         self.engine = engine
 
     def list_locked_pools(self) -> List[str]:
-        return _unwrap(_native.keymgmt_list_locked_pools(self.engine._handle))
+        return _unwrap(_native.keymgmt_list_locked_pools(native_handle(self.engine)))
 
     def try_usb_unlock(self, pool_name: str) -> bool:
         return _unwrap(_native.keymgmt_try_usb_unlock(
-            self.engine._handle, pool_name,
+            native_handle(self.engine), pool_name,
             str(KEYSLOT_DIR), str(USB_MOUNTPOINT), str(RUNTIME_KEY_DIR),
         ))
 
     def try_tty_unlock(self, pool_name: str, tty_path: str, timeout: int = 300) -> bool:
         return _unwrap(_native.keymgmt_try_tty_unlock(
-            self.engine._handle, pool_name, tty_path, timeout,
+            native_handle(self.engine), pool_name, tty_path, timeout,
             str(KEYSLOT_DIR), str(RUNTIME_KEY_DIR),
         ))
 
@@ -131,7 +136,7 @@ class PoolProvisioner:
         compression: str = "lz4",
     ) -> None:
         _unwrap(_native.keymgmt_create_encrypted_pool(
-            self.engine._handle, pool_name, vdev_type, devices, master_passphrase,
+            native_handle(self.engine), pool_name, vdev_type, devices, master_passphrase,
             json.dumps(list(usb_devices or [])), ashift, compression,
             str(KEYSLOT_DIR), str(RUNTIME_KEY_DIR), str(USB_MOUNTPOINT),
         ))

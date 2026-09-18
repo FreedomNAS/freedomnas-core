@@ -58,6 +58,22 @@ def _load_python():
     return ReconciliationEngine
 
 
+try:
+    from freedomnas.engine import BACKEND as _ENGINE_BACKEND
+except ImportError:
+    from engine import BACKEND as _ENGINE_BACKEND  # type: ignore[no-redef]
+
+# The native module drives the engine from inside the extension, so it
+# cannot run on top of the Python engine. Rolling the engine back rolls
+# this back with it, rather than failing on the first call.
+if BACKEND in ("native", "auto") and _ENGINE_BACKEND != "native":
+    if BACKEND == "native":
+        logger.warning(
+            "FREEDOMNAS_RECONCILE=native needs FREEDOMNAS_ENGINE=native (engine backend is %s); "
+            "using the Python reconciler", _ENGINE_BACKEND,
+        )
+    BACKEND = "python"
+
 if BACKEND == "native":
     ReconciliationEngine = _load_native()
 elif BACKEND == "auto":

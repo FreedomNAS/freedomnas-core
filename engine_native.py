@@ -328,5 +328,22 @@ class FreedomNASEngine:
         )
 
 
+def native_handle(engine) -> int:
+    """
+    The native handle of an engine, for the modules whose logic runs in Nim.
+
+    They drive the engine from inside the extension, so a pure-Python engine
+    — FREEDOMNAS_ENGINE=python, or one built from engine_py directly — cannot
+    stand in for it. Say so, instead of an AttributeError on `_handle`.
+    """
+    handle = getattr(engine, "_handle", None)
+    if handle is None:
+        raise TypeError(
+            f"{type(engine).__module__}.{type(engine).__name__} is not the native "
+            "engine; the native modules need FREEDOMNAS_ENGINE=native"
+        )
+    return handle
+
+
 def get_engine(profile_dir: Optional[str] = None) -> FreedomNASEngine:
     return FreedomNASEngine(profile_dir)

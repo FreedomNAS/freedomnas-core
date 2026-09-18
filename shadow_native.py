@@ -22,6 +22,11 @@ except ImportError:
     import freedomnas_native as _native  # type: ignore[no-redef]
 
 try:
+    from freedomnas.engine_native import native_handle
+except ImportError:
+    from engine_native import native_handle  # type: ignore[no-redef]
+
+try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
 except ImportError:
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore[no-redef]
@@ -44,13 +49,13 @@ def _unwrap(payload: str):
 
 
 def active_dataset(engine) -> Optional[str]:
-    name = _unwrap(_native.shadow_active_dataset(engine._handle))
+    name = _unwrap(_native.shadow_active_dataset(native_handle(engine)))
     return name or None
 
 
 def ensure_dataset(engine, pool: str) -> bool:
-    return _unwrap(_native.shadow_ensure_dataset(engine._handle, pool))
+    return _unwrap(_native.shadow_ensure_dataset(native_handle(engine), pool))
 
 
 def sync(engine, config_path: str) -> List[Dict]:
-    return _unwrap(_native.shadow_sync(engine._handle, config_path))
+    return _unwrap(_native.shadow_sync(native_handle(engine), config_path))

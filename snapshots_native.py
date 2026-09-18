@@ -24,6 +24,11 @@ except ImportError:
     import freedomnas_native as _native  # type: ignore[no-redef]
 
 try:
+    from freedomnas.engine_native import native_handle
+except ImportError:
+    from engine_native import native_handle  # type: ignore[no-redef]
+
+try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
     from freedomnas.snapshots_py import PREFIX, snapshot_name
 except ImportError:
@@ -58,4 +63,4 @@ class SnapshotScheduler:
     def run(self, interval: str, now: Optional[datetime] = None) -> List[Dict]:
         policies = json.dumps(self.config.get_snapshot_policies())
         now_iso = now.isoformat() if now is not None else ""
-        return _unwrap(_native.snapshot_run(self.engine._handle, policies, interval, now_iso))
+        return _unwrap(_native.snapshot_run(native_handle(self.engine), policies, interval, now_iso))

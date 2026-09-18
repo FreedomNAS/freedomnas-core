@@ -24,6 +24,11 @@ except ImportError:
     import freedomnas_native as _native  # type: ignore[no-redef]
 
 try:
+    from freedomnas.engine_native import native_handle
+except ImportError:
+    from engine_native import native_handle  # type: ignore[no-redef]
+
+try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
     from freedomnas.reconcile_py import ActionResult
 except ImportError:
@@ -63,7 +68,7 @@ class ReconciliationEngine:
         state = json.dumps(self.config.to_dict())
         nfs_shares = json.dumps(self.config.get_nfs_shares())
         results = _unwrap(_native.reconcile_run(
-            self.engine._handle, desired_path or "", mode, state, nfs_shares
+            native_handle(self.engine), desired_path or "", mode, state, nfs_shares
         ))
         return [
             ActionResult(

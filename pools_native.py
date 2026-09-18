@@ -23,6 +23,11 @@ except ImportError:
     import freedomnas_native as _native  # type: ignore[no-redef]
 
 try:
+    from freedomnas.engine_native import native_handle
+except ImportError:
+    from engine_native import native_handle  # type: ignore[no-redef]
+
+try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
 except ImportError:
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore[no-redef]
@@ -51,9 +56,9 @@ def attach_devices(
     log: Optional[Sequence[str]] = None,
 ) -> Dict[str, List]:
     return _unwrap(_native.pool_attach_devices(
-        engine._handle, pool_name, json.dumps(list(cache or [])), json.dumps(list(log or []))
+        native_handle(engine), pool_name, json.dumps(list(cache or [])), json.dumps(list(log or []))
     ))
 
 
 def detach_device(engine, pool_name: str, device: str) -> None:
-    _unwrap(_native.pool_detach_device(engine._handle, pool_name, device))
+    _unwrap(_native.pool_detach_device(native_handle(engine), pool_name, device))
