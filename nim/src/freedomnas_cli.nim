@@ -10,6 +10,7 @@ import std/[json, os, parseopt, strutils, tables, times]
 import fnas/[engine, errors, osdetect, pyyaml, yamlvalue]
 import fnas/config as fnasconfig
 import fnas/snapshots as fnassnapshots
+import fnas/shadow as fnasshadow
 
 const
   ProfileCandidates = [
@@ -26,6 +27,7 @@ Usage:
   freedomnas check   [--profile-dir DIR] [--os EDITION]
   freedomnas config  [show|check|path] [--config FILE]
   freedomnas snapshot-run <hourly|daily|weekly|monthly> [--profile-dir DIR] [--os EDITION] [--config FILE]
+  freedomnas shadow-sync [--profile-dir DIR] [--os EDITION] [--config FILE]
   freedomnas version
 
 Environment:
@@ -137,6 +139,26 @@ proc cmdSnapshotRun(dir, osOverride, explicitConfigPath, interval: string): int 
 
   if failed > 0: 1 else: 0
 
+proc cmdShadowSync(dir, osOverride, explicitConfigPath: string): int =
+  let
+    eng = openEngine(dir, osOverride)
+    path = configPath(explicitConfigPath)
+    results = fnasshadow.syncAll(eng, path)
+
+  if results.len == 0:
+    echo "Nothing to mirror."
+    return 0
+
+  var failed = 0
+  for r in results:
+    if r["error"].kind != JNull:
+      inc failed
+      stderr.writeLine "FAIL  " & r["dataset"].getStr & ": " & r["error"].getStr
+      continue
+    echo "OK  ", r["dataset"].getStr
+
+  if failed > 0: 1 else: 0
+
 proc main(): int =
   var
     command = ""
@@ -191,6 +213,7 @@ proc main(): int =
     of "check": result = cmdCheck(dir, osOverride)
     of "config": result = cmdConfig(action, configFile)
     of "snapshot-run": result = cmdSnapshotRun(dir, osOverride, configFile, action)
+    of "shadow-sync": result = cmdShadowSync(dir, osOverride, configFile)
     of "version": echo "freedomnas-core 4.0.0 (native)"
     of "": echo Usage; result = 2
     else:

@@ -4,6 +4,7 @@ import fnas/[engine, errors, osdetect, pyformat, pyyaml, shlexutil, yamlvalue]
 import fnas/config as fnasconfig
 import fnas/snapshots as fnassnapshots
 import fnas/pools as fnaspools
+import fnas/shadow as fnasshadow
 
 ## Nim identifiers ignore case and underscores, so every exported name here
 ## would collide with the camelCase proc it wraps: the calls are qualified
@@ -231,3 +232,31 @@ proc pool_detach_device(handle: int, poolName, device: string): string {.exportp
     withoutGil:
       fnaspools.detachDevice(eng, poolName, device)
     $(%*{"value": true})
+
+# ---------------------------------------------------------------------------
+# The configuration's shadow copy
+# ---------------------------------------------------------------------------
+
+proc shadow_active_dataset(handle: int): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var active: string
+    withoutGil:
+      active = fnasshadow.activeDataset(eng)
+    $(%*{"value": active})
+
+proc shadow_ensure_dataset(handle: int, pool: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var created: bool
+    withoutGil:
+      created = fnasshadow.ensureDataset(eng, pool)
+    $(%*{"value": created})
+
+proc shadow_sync(handle: int, configPath: string): string {.exportpy.} =
+  guarded:
+    let eng = lookup(handle)
+    var results: JsonNode
+    withoutGil:
+      results = fnasshadow.syncAll(eng, configPath)
+    $(%*{"value": results})

@@ -58,30 +58,31 @@ FREEDOMNAS_ENGINE=native python3 -m pytest tests/ -q
 ```
 
 `nimble cli` builds `nim/freedomnas`, the native CLI: `status`, `check`,
-`config show|check|path`, `snapshot-run <interval>` and `version`, with no
-interpreter involved. What still needs Python is everything built on the
-keyslots or the module runtime — `reconcile`, `unlock-pools`, `serve` —
-through `python -m freedomnas`.
+`config show|check|path`, `snapshot-run <interval>`, `shadow-sync` and
+`version`, with no interpreter involved. What still needs Python is
+everything built on the keyslots or the module runtime — `reconcile`,
+`unlock-pools`, `serve` — through `python -m freedomnas`.
 
 ### More than two implementations, same pattern
 
-Scheduled snapshots (`snapshots.py`) and pool composition (`pools.py`)
-follow the same split as the engine and the configuration manager. Both
-native sides call the engine's native handle directly — `engine._handle` —
-so they only make sense paired with the native engine, and both are held to
-the pure-Python behaviour by a parity test against a throwaway "zfs"
-profile whose actions read and write a plain file instead of talking to
-real ZFS:
+Scheduled snapshots (`snapshots.py`), pool composition (`pools.py`) and the
+configuration's shadow copy (`shadow.py`) follow the same split as the
+engine and the configuration manager. All three native sides call the
+engine's native handle directly — `engine._handle` — so they only make
+sense paired with the native engine, and all three are held to the
+pure-Python behaviour by a parity test against a throwaway "zfs" profile
+whose actions read and write a plain file instead of talking to real ZFS:
 
 | Module | Backend switch | Pure Python | Native Python side | Nim logic | Parity test |
 |--------|----------------|-------------|---------------------|-----------|-------------|
 | Scheduled snapshots | `snapshots.py` (`FREEDOMNAS_SNAPSHOTS`) | `snapshots_py.py` | `snapshots_native.py` | `nim/src/fnas/snapshots.nim` | `tests/test_snapshots_parity.py` |
 | Pool cache/log devices | `pools.py` (`FREEDOMNAS_POOLS`) | `pools_py.py` | `pools_native.py` | `nim/src/fnas/pools.nim` | `tests/test_pools_parity.py` |
+| Configuration's shadow copy | `shadow.py` (`FREEDOMNAS_SHADOW`) | `shadow_py.py` | `shadow_native.py` | `nim/src/fnas/shadow.nim` | `tests/test_shadow_parity.py` |
 
 Every one of these backend switches follows `FREEDOMNAS_ENGINE` when its
-own variable is unset. Scheduled snapshots are also what makes
-`freedomnas snapshot-run <interval>` possible with no Python interpreter
-at all.
+own variable is unset. Scheduled snapshots and the shadow copy are also
+what make `freedomnas snapshot-run <interval>` and `freedomnas shadow-sync`
+possible with no Python interpreter at all.
 
 ## Quick Usage
 
