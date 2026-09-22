@@ -82,6 +82,14 @@ def expected_service_start(engine: FreedomNASEngine) -> str:
     return expected
 
 
+def expected_service_start_args(engine: FreedomNASEngine, service_name: str) -> list:
+    """The argv `services.start` resolves to on this host, for any service name."""
+    return [
+        token.replace("samba", service_name)
+        for token in shlex.split(expected_service_start(engine))
+    ]
+
+
 # ---------------------------------------------------------------------------
 # OS Detection
 # ---------------------------------------------------------------------------
@@ -248,7 +256,7 @@ class TestGetCommand:
     def test_a_value_with_metacharacters_stays_one_argument(self):
         engine = make_engine("debian")
         cmd = engine.get_command("services", "start", service_name="samba; rm -rf /")
-        assert shlex.split(cmd) == ["systemctl", "start", "samba; rm -rf /"]
+        assert shlex.split(cmd) == expected_service_start_args(engine, "samba; rm -rf /")
 
     def test_a_value_with_spaces_stays_one_argument(self):
         engine = make_engine("debian")
@@ -258,7 +266,7 @@ class TestGetCommand:
     def test_plain_values_are_left_as_they_are(self):
         engine = make_engine("debian")
         assert engine.get_command("services", "start", service_name="samba") == (
-            "systemctl start samba"
+            expected_service_start(engine)
         )
 
     def test_multi_args_become_one_argument_each(self):
@@ -327,7 +335,7 @@ class TestExecuteRouting:
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             engine.execute("services", "start", service_name="samba >/etc/shadow")
             args, kwargs = mock_run.call_args
-            assert args[0] == ["systemctl", "start", "samba >/etc/shadow"]
+            assert args[0] == expected_service_start_args(engine, "samba >/etc/shadow")
             assert not kwargs.get("shell")
 
     def test_pipe_command_uses_shell_true(self):
