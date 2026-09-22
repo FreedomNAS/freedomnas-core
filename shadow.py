@@ -1,98 +1,128 @@
 """
-The Configuration's Shadow Copy — backend selection.
+The configuration's shadow copy on every pool that carries one.
 
-Everything imports active_dataset/ensure_dataset/sync from here, and this
-module decides which implementation answers:
+`config.yaml` is a backup of the system state, not the source of truth — and
+a backup that lives only on the OS disk is no backup at all. When the disk
+that holds the root pool dies, what survives is the data pool, and that is
+where the appliance's identity has to be waiting: hostname, users, shares,
+snapshot policies.
 
-  FREEDOMNAS_SHADOW=python   shadow_py.py — pure Python (default)
-  FREEDOMNAS_SHADOW=native   shadow_native.py — mount/copy/unmount run in
-                             Nim, and an ImportError if it is not built
-  FREEDOMNAS_SHADOW=auto     native when importable, python otherwise
+So every pool gets a `<pool>/.freedomnas` dataset, and the configuration is
+mirrored into each of them. `firstboot.sh` looks for exactly that dataset
+when it comes up, which is what makes a reinstall onto a blank disk find its
+old self on the data pool.
 
-Unset, it follows FREEDOMNAS_ENGINE, so one variable moves the whole core
-and the other pins this module back if only that needs reverting. The
-native implementation calls the engine's native handle directly, so it
-only makes sense paired with the native engine.
-
-Both are held to the same behaviour by tests/test_shadow_parity.py.
-CommandExecutionError and CommandTranslationError come from engine either
-way.
+All the copies mount at the same place (/etc/freedomnas/state), only one at a
+time — which is why mirroring mounts them somewhere else for a moment, the
+same way the initramfs mounts the root dataset at /sysroot.
 """
 
 import logging
-import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional
 
 try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
-except ImportError:
-    from engine import CommandExecutionError, CommandTranslationError  # type: ignore[no-redef]
-
-try:
-    from freedomnas.shadow_py import CONFIG_NAME, DATASET_NAME, STATE_DIR
-except ImportError:
-    from shadow_py import CONFIG_NAME, DATASET_NAME, STATE_DIR  # type: ignore[no-redef]
+except ImportError:  # running from the repository, not from the package
+    from engine import CommandExecutionError, CommandTranslationError  # type: ignore
 
 logger = logging.getLogger("FreedomNAS.Shadow")
 
-BACKEND = os.environ.get(
-    "FREEDOMNAS_SHADOW",
-    os.environ.get("FREEDOMNAS_ENGINE", "python"),
-).strip().lower()
+DATASET_NAME = ".freedomnas"
+STATE_DIR = "/etc/freedomnas/state"
+CONFIG_NAME = "config.yaml"
 
 
-def _load_native():
+def _pools(engine) -> List[str]:
     try:
-        from freedomnas.shadow_native import active_dataset, ensure_dataset, sync
-    except ImportError:
-        from shadow_native import active_dataset, ensure_dataset, sync  # type: ignore[no-redef]
-    return active_dataset, ensure_dataset, sync
+        stdout, _ = engine.execute("zfs", "pool_list", check=False)
+    except (CommandExecutionError, CommandTranslationError) as exc:
+        logger.error("Cannot list pools: %s", exc)
+        return []
+    return [line.split()[0] for line in stdout.splitlines() if line.split()]
 
 
-def _load_python():
+def _exists(engine, dataset: str) -> bool:
     try:
-        from freedomnas.shadow_py import active_dataset, ensure_dataset, sync
-    except ImportError:
-        from shadow_py import active_dataset, ensure_dataset, sync  # type: ignore[no-redef]
-    return active_dataset, ensure_dataset, sync
+        stdout, _ = engine.execute("zfs", "dataset_at_path", path=dataset, check=False)
+    except (CommandExecutionError, CommandTranslationError):
+        return False
+    return stdout.strip() == dataset
 
 
-try:
-    from freedomnas.engine import BACKEND as _ENGINE_BACKEND
-except ImportError:
-    from engine import BACKEND as _ENGINE_BACKEND  # type: ignore[no-redef]
-
-# The native module drives the engine from inside the extension, so it
-# cannot run on top of the Python engine. Rolling the engine back rolls
-# this back with it, rather than failing on the first call.
-if BACKEND in ("native", "auto") and _ENGINE_BACKEND != "native":
-    if BACKEND == "native":
-        logger.warning(
-            "FREEDOMNAS_SHADOW=native needs FREEDOMNAS_ENGINE=native (engine backend is %s); "
-            "using the Python shadow copy", _ENGINE_BACKEND,
-        )
-    BACKEND = "python"
-
-if BACKEND == "native":
-    active_dataset, ensure_dataset, sync = _load_native()
-elif BACKEND == "auto":
+def active_dataset(engine) -> Optional[str]:
+    """The `.freedomnas` currently mounted at /etc/freedomnas/state, if any."""
     try:
-        active_dataset, ensure_dataset, sync = _load_native()
-        BACKEND = "native"
-    except ImportError as exc:
-        logger.info("Native shadow backend unavailable (%s); using Python", exc)
-        active_dataset, ensure_dataset, sync = _load_python()
-        BACKEND = "python"
-else:
-    active_dataset, ensure_dataset, sync = _load_python()
+        stdout, _ = engine.execute("zfs", "dataset_at_path", path=STATE_DIR, check=False)
+    except (CommandExecutionError, CommandTranslationError):
+        return None
+    name = stdout.strip()
+    return name if name.endswith(f"/{DATASET_NAME}") else None
 
-__all__ = [
-    "active_dataset",
-    "BACKEND",
-    "CommandExecutionError",
-    "CommandTranslationError",
-    "CONFIG_NAME",
-    "DATASET_NAME",
-    "ensure_dataset",
-    "STATE_DIR",
-    "sync",
-]
+
+def ensure_dataset(engine, pool: str) -> bool:
+    """
+    Give a pool its shadow dataset. Returns True if it had to be created.
+
+    Called when a pool is created, so that a data pool is ready to hold the
+    configuration from the moment it exists.
+    """
+    dataset = f"{pool}/{DATASET_NAME}"
+    if _exists(engine, dataset):
+        return False
+    engine.execute("zfs", "create_state_dataset", pool_name=pool)
+    logger.info("Created shadow dataset %s", dataset)
+    return True
+
+
+def sync(engine, config_path: str) -> List[Dict]:
+    """
+    Copy the live configuration into every other pool's shadow dataset.
+
+    The pool the configuration is already served from is skipped: it is the
+    source. Never raises — a pool that cannot be mirrored is reported and the
+    others still get their copy.
+    """
+    source = Path(config_path)
+    if not source.is_file():
+        logger.warning("No configuration at %s — nothing to mirror", source)
+        return []
+
+    active = active_dataset(engine)
+    results = []
+    for pool in _pools(engine):
+        dataset = f"{pool}/{DATASET_NAME}"
+        if dataset == active or not _exists(engine, dataset):
+            continue
+        results.append(_copy_into(engine, dataset, source))
+    return results
+
+
+def _copy_into(engine, dataset: str, source: Path) -> Dict:
+    result = {"dataset": dataset, "copied": False, "error": None}
+    mountpoint = tempfile.mkdtemp(prefix="freedomnas-shadow.")
+    try:
+        engine.execute("zfs", "mount_dataset_at", dataset=dataset, mountpoint=mountpoint)
+    except (CommandExecutionError, CommandTranslationError) as exc:
+        result["error"] = f"could not mount: {exc}"
+        Path(mountpoint).rmdir()
+        return result
+
+    try:
+        shutil.copy2(source, Path(mountpoint) / CONFIG_NAME)
+        result["copied"] = True
+        logger.info("Mirrored the configuration to %s", dataset)
+    except OSError as exc:
+        result["error"] = str(exc)
+    finally:
+        try:
+            engine.execute("zfs", "unmount_at", mountpoint=mountpoint, check=False)
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.error("Left %s mounted at %s: %s", dataset, mountpoint, exc)
+        try:
+            Path(mountpoint).rmdir()
+        except OSError:
+            pass
+    return result

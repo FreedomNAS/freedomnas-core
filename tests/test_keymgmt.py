@@ -1,7 +1,5 @@
 """
-Reference behaviour of the pure-Python key management module.
-
-Establishes a baseline before any Nim port: wrap_key/unwrap_key round-trip
+Behaviour of the key management module: wrap_key/unwrap_key round-trip
 and tamper detection, KeyslotStore persistence, discovery, USB zero-touch
 unlock, the TTY passphrase fallback (against a real pty — termios only
 works on one), and pool-creation provisioning.
@@ -15,7 +13,7 @@ import time
 
 import pytest
 
-import keymgmt_py as keymgmt
+import keymgmt
 
 
 class FakeEngine:

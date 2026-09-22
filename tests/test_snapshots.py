@@ -10,15 +10,7 @@ import pytest
 # The exception class comes from the module under test, not from `engine`:
 # core modules import it as `freedomnas.engine` when that resolves and as
 # `engine` otherwise, and the two are different classes to `except`.
-from snapshots import BACKEND, CommandExecutionError, PREFIX, SnapshotScheduler, snapshot_name
-
-# FakeEngine has no native handle, so these exercise the pure-Python
-# scheduler's own logic directly. The native scheduler is verified against
-# the Python one, backend to backend, in test_snapshots_parity.py.
-uses_fake_engine = pytest.mark.skipif(
-    BACKEND == "native",
-    reason="FakeEngine has no native handle; covered by test_snapshots_parity.py",
-)
+from snapshots import CommandExecutionError, PREFIX, SnapshotScheduler, snapshot_name
 
 
 class FakeEngine:
@@ -64,7 +56,6 @@ def test_name_sorts_by_age():
     assert early < late
 
 
-@uses_fake_engine
 def test_creates_one_snapshot_per_policy():
     engine = FakeEngine()
     config = FakeConfig([{"dataset": "tank/home", "hourly": 3}])
@@ -74,7 +65,6 @@ def test_creates_one_snapshot_per_policy():
     assert engine.snapshots == ["tank/home@freedomnas-hourly-20260910-030000"]
 
 
-@uses_fake_engine
 def test_an_interval_the_policy_does_not_ask_for_is_skipped():
     engine = FakeEngine()
     config = FakeConfig([{"dataset": "tank/home", "hourly": 3, "daily": 0}])
@@ -82,7 +72,6 @@ def test_an_interval_the_policy_does_not_ask_for_is_skipped():
     assert engine.snapshots == []
 
 
-@uses_fake_engine
 def test_prunes_down_to_the_kept_count():
     engine = FakeEngine(older("tank/home", "hourly", 5))
     config = FakeConfig([{"dataset": "tank/home", "hourly": 3}])
@@ -95,7 +84,6 @@ def test_prunes_down_to_the_kept_count():
     assert result["destroyed"][0].endswith("20260901-030000")
 
 
-@uses_fake_engine
 def test_never_destroys_what_it_did_not_create():
     foreign = [
         "tank/home@pre-update-20260101-000000",   # the update terminal's
@@ -111,7 +99,6 @@ def test_never_destroys_what_it_did_not_create():
         assert name in engine.snapshots, f"{name} was destroyed and must not have been"
 
 
-@uses_fake_engine
 def test_a_failed_snapshot_does_not_stop_the_other_policies():
     class Failing(FakeEngine):
         def execute(self, category, action, **kwargs):
@@ -130,7 +117,6 @@ def test_a_failed_snapshot_does_not_stop_the_other_policies():
     assert results[1]["created"] is not None
 
 
-@uses_fake_engine
 def test_unknown_interval_is_refused():
     with pytest.raises(ValueError):
         SnapshotScheduler(FakeEngine(), FakeConfig([])).run("yearly")

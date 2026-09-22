@@ -1,16 +1,11 @@
 """
-Reference behaviour of the pure-Python ReconciliationEngine.
-
-White-box: it reaches into `_do_*`/`_apply_*`, which only exist on the pure
-implementation — the native backend exposes `reconcile()` alone (see
-reconcile_native.py), so this file imports reconcile_py directly rather
-than through the reconcile.py backend switch. The two backends are held to
-identical `reconcile()` output in tests/test_reconcile_parity.py.
+Behaviour of the ReconciliationEngine. White-box: it reaches into
+`_do_*`/`_apply_*` as well as `reconcile()`.
 """
 
 import pytest
 
-from reconcile_py import (
+from reconcile import (
     Change,
     CommandExecutionError,
     ReconcileMode,
@@ -43,7 +38,7 @@ class FakeEngine:
         try:
             return self.service_names[(category, key)]
         except KeyError:
-            from reconcile_py import CommandTranslationError
+            from reconcile import CommandTranslationError
             raise CommandTranslationError(f"no such value: {category}.{key}")
 
 

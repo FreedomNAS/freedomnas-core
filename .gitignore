@@ -41,8 +41,8 @@ htmlcov/
 *.tar.gz
 *.tar.xz
 PKGBUILD.build/
-/src/
-/pkg/
+src/
+pkg/
 
 # Local development
 .env
@@ -53,9 +53,3 @@ env/
 # OS-specific
 .DS_Store
 Thumbs.db
-
-# Nim build artifacts (sources live in nim/src/)
-/freedomnas_native.so
-nim/freedomnas
-nim/nimcache/
-nim/*.so

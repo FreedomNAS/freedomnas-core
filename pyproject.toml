@@ -39,8 +39,6 @@ packages = [
 
 [tool.setuptools.package-data]
 "*" = ["manifest.json"]
-# Built by nim/freedomnas.nimble before the wheel; see debian/rules and PKGBUILD.
-"freedomnas" = ["freedomnas_native.so"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

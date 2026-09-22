@@ -1,22 +1,16 @@
 """
-Reference behaviour of the pure-Python PackageManager, against the real
+Behaviour of the PackageManager, against the real
 freedomnas-profiles/packages/ tree — there is no throwaway fixture for this
 one: the manifest/category shape is the contract, and the real data is what
 exercises every branch (init-system overlays, pkgbuilds, required vs
 optional categories) without having to hand-write a second copy of it.
-
-White-box: it reaches into `_load_category`/`categories`, which only exist
-on the pure implementation, so this imports package_manager_py directly
-rather than through the package_manager.py backend switch. The two
-backends are held to identical public-method output in
-tests/test_package_manager_parity.py.
 """
 
 from pathlib import Path
 
 import pytest
 
-from package_manager_py import PackageManager
+from package_manager import PackageManager
 
 PACKAGES_DIR = str(Path(__file__).parent.parent.parent / "freedomnas-profiles" / "packages")
 

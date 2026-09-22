@@ -5,17 +5,7 @@ it is reading from.
 
 from pathlib import Path
 
-import pytest
-
 import shadow
-
-# FakeEngine has no native handle, so these exercise the pure-Python
-# implementation's own logic directly. The native backend is verified
-# against the Python one, backend to backend, in test_shadow_parity.py.
-uses_fake_engine = pytest.mark.skipif(
-    shadow.BACKEND == "native",
-    reason="FakeEngine has no native handle; covered by test_shadow_parity.py",
-)
 
 
 class FakeEngine:
@@ -48,21 +38,18 @@ class FakeEngine:
         raise AssertionError(f"unexpected call: {category}.{action}")
 
 
-@uses_fake_engine
 def test_a_new_pool_gets_its_dataset():
     engine = FakeEngine(pools=["tank"], datasets=[])
     assert shadow.ensure_dataset(engine, "tank") is True
     assert engine.created == ["tank"]
 
 
-@uses_fake_engine
 def test_an_existing_dataset_is_left_alone():
     engine = FakeEngine(pools=["tank"], datasets=["tank/.freedomnas"])
     assert shadow.ensure_dataset(engine, "tank") is False
     assert engine.created == []
 
 
-@uses_fake_engine
 def test_the_configuration_reaches_the_data_pool(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("system:\n  hostname: nas\n")
@@ -80,7 +67,6 @@ def test_the_configuration_reaches_the_data_pool(tmp_path):
     assert engine.mounted["datapool/.freedomnas"].startswith("/tmp/freedomnas-shadow.")
 
 
-@uses_fake_engine
 def test_the_pool_being_read_from_is_never_written_to(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("system: {}\n")
@@ -91,7 +77,6 @@ def test_the_pool_being_read_from_is_never_written_to(tmp_path):
     assert engine.mounted == {}
 
 
-@uses_fake_engine
 def test_a_pool_without_the_dataset_is_skipped(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("system: {}\n")
@@ -103,7 +88,6 @@ def test_a_pool_without_the_dataset_is_skipped(tmp_path):
     assert shadow.sync(engine, str(config)) == []
 
 
-@uses_fake_engine
 def test_no_configuration_yet_is_not_an_error(tmp_path):
     engine = FakeEngine(pools=["tank"], datasets=["tank/.freedomnas"])
     assert shadow.sync(engine, str(tmp_path / "assente.yaml")) == []
