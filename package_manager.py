@@ -112,6 +112,16 @@ class PackageManager:
         """Get the {name, git} PKGBUILD repositories a category builds after its packages."""
         return self._edition_values(category_id, edition, "pkgbuilds", init_system)
 
+    def get_admin_groups_for_os(
+        self, category_id: str, edition: str, init_system: Optional[str] = None
+    ) -> List[str]:
+        """
+        Get the groups the administrator has to belong to for a category's
+        own tools to work — Docker's socket is owned by `docker`, and the
+        update run reports a failed step without it.
+        """
+        return self._edition_values(category_id, edition, "admin_groups", init_system)
+
     def get_services_for_os(
         self, category_id: str, edition: str, init_system: Optional[str] = None
     ) -> List[str]:
