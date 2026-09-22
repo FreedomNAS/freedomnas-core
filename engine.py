@@ -215,7 +215,7 @@ class FreedomNASEngine:
                     f"commands against target root {engine.root}. Add it to "
                     f"profiles/installer/installer-{os_type}.json."
                 )
-            engine.chroot_prefix = template.format(root=engine.root)
+            engine.chroot_prefix = template.format(root=shlex.quote(engine.root))
 
         logger.info(
             f"FreedomNAS Engine (target) initialized for {os_type} "
@@ -500,22 +500,53 @@ class FreedomNASEngine:
         """Return True if the command string contains shell metacharacters."""
         return any(tok in command for tok in ('|', '>', '<', ';', '&', '$('))
 
-    def _sanitize_kwargs(self, kwargs: dict) -> dict:
+    def _quote_kwargs(self, category: str, kwargs: dict) -> dict:
         """
-        Strip shell-injection characters from all template variable values.
+        Quote every template variable so that it reaches the command as data.
 
-        This is a belt-and-suspenders measure for commands routed through
-        shell=True.  Template variables for paths, IPs, and service names
-        should never contain these characters legitimately.
+        A value becomes exactly one argument, whatever it contains, both for
+        shlex.split and for sh: the same quoting holds on either path. An
+        empty value is an empty argument. The variables a category lists
+        under `multi_args` (devices, package lists, optional flags) are split
+        on whitespace instead: each word becomes one argument, and an empty
+        value none.
+
+        Values are refused, not cleaned: a control character, or a single
+        argument that starts with "-" and would be read as an option.
         """
-        dangerous = frozenset(';|&$`\\\n\r')
-        sanitized = {}
+        section = self.profile.get(category, {})
+        multi = set(section.get("multi_args", [])) if isinstance(section, dict) else set()
+        quoted = {}
         for key, value in kwargs.items():
-            if isinstance(value, str):
-                sanitized[key] = ''.join(c for c in value if c not in dangerous)
+            text = str(value)
+            if any(c in text for c in "\n\r\0"):
+                raise CommandTranslationError(
+                    f"{category}: '{key}' contains a control character"
+                )
+            if key in multi:
+                words = text.split()
             else:
-                sanitized[key] = value
-        return sanitized
+                if text.startswith("-"):
+                    raise CommandTranslationError(
+                        f"{category}: '{key}' may not start with '-': {text!r}"
+                    )
+                words = [text]
+            quoted[key] = " ".join(shlex.quote(word) for word in words)
+        return quoted
+
+    def _template(self, category: str, action: str) -> Union[str, List[str]]:
+        try:
+            if action == "multi_args":
+                raise KeyError(action)
+            return self.profile[category][action]
+        except KeyError:
+            available_actions = [
+                a for a in self.profile.get(category, {}).keys() if a != "multi_args"
+            ]
+            raise CommandTranslationError(
+                f"Command not found: {category}.{action}\n"
+                f"Available actions in '{category}': {', '.join(available_actions)}"
+            )
 
     def get_command(
         self,
@@ -536,8 +567,9 @@ class FreedomNASEngine:
                                   or a list of commands that should be executed sequentially.
         
         Raises:
-            CommandTranslationError: If the command cannot be found in the profile
-        
+            CommandTranslationError: If the command cannot be found in the
+                profile, or a value is refused by _quote_kwargs
+
         Example:
             cmd = engine.get_command("zfs", "pool_create",
                                     pool_name="datapool",
@@ -546,22 +578,13 @@ class FreedomNASEngine:
                                     compression="lz4",
                                     devices="/dev/sda /dev/sdb /dev/sdc")
         """
-        try:
-            command_template = self.profile[category][action]
-        except KeyError:
-            available_actions = list(self.profile.get(category, {}).keys())
-            raise CommandTranslationError(
-                f"Command not found: {category}.{action}\n"
-                f"Available actions in '{category}': {', '.join(available_actions)}"
-            )
+        command_template = self._template(category, action)
+        quoted = self._quote_kwargs(category, kwargs)
 
-        safe_kwargs = self._sanitize_kwargs(kwargs)
-
-        # Handle both single commands and command sequences
         if isinstance(command_template, list):
-            return [cmd.format(**safe_kwargs) for cmd in command_template]
+            return [cmd.format(**quoted) for cmd in command_template]
         else:
-            return command_template.format(**safe_kwargs)
+            return command_template.format(**quoted)
     
     def execute(
         self,
@@ -594,23 +617,24 @@ class FreedomNASEngine:
             if stderr:
                 logger.warning(f"Command warning: {stderr}")
         """
-        try:
-            command_template = self.get_command(category, action, **kwargs)
-        except CommandTranslationError:
-            raise
-        
-        # Handle command sequences (list of commands)
+        command_template = self._template(category, action)
+        quoted = self._quote_kwargs(category, kwargs)
+
         if isinstance(command_template, list):
             last_result = ("", "")
-            for i, cmd in enumerate(command_template):
+            for i, step in enumerate(command_template):
+                cmd = step.format(**quoted)
                 logger.debug(f"Executing command {i+1}/{len(command_template)}: {cmd}")
-                result = self._run_safe(cmd, timeout, check)
-                last_result = result
+                last_result = self._run_safe(
+                    cmd, timeout, check, self._contains_shell_metachar(step)
+                )
             return last_result
-        
-        # Execute single command
-        logger.debug(f"Executing command: {command_template}")
-        return self._run_safe(command_template, timeout, check)
+
+        cmd = command_template.format(**quoted)
+        logger.debug(f"Executing command: {cmd}")
+        return self._run_safe(
+            cmd, timeout, check, self._contains_shell_metachar(command_template)
+        )
 
     def execute_with_stdin(
         self,
@@ -716,14 +740,16 @@ class FreedomNASEngine:
 
     def _resolve_invocation(
         self,
-        command: str
+        command: str,
+        needs_shell: bool,
     ) -> Tuple[Union[str, List[str]], bool]:
         """
         Turn a formatted command string into the (argv, shell) pair to run.
 
-        Without a chroot prefix this is the historical behaviour: commands
-        containing shell metacharacters run via shell=True, everything else
-        via shlex.split + shell=False.
+        `needs_shell` comes from the profile's template, never from the
+        formatted command: a value must not be able to decide how the command
+        is run. Without a chroot prefix, a template with shell metacharacters
+        runs via shell=True, everything else via shlex.split + shell=False.
 
         With a chroot prefix (a target engine, see for_target()) nothing ever
         goes through shell=True — the prefix argv is prepended and a command
@@ -731,8 +757,6 @@ class FreedomNASEngine:
         argument, so quoting inside the command can never escape into the
         host's shell.
         """
-        needs_shell = self._contains_shell_metachar(command)
-
         if not self.chroot_prefix:
             if needs_shell:
                 return command, True
@@ -746,17 +770,18 @@ class FreedomNASEngine:
     def _run_safe(
         self,
         command: str,
-        timeout: int = 30,
-        check: bool = True
+        timeout: int,
+        check: bool,
+        needs_shell: bool,
     ) -> Tuple[str, str]:
         """
         Execute a command safely.
 
-        Commands without shell metacharacters run via shlex.split + shell=False.
-        Commands that contain pipes, redirects, or && run via shell=True so the
-        shell can interpret those operators correctly.  Template variables are
-        sanitized by _sanitize_kwargs before they reach this method, limiting
-        injection risk to the JSON profile author.
+        Templates without shell metacharacters run via shlex.split +
+        shell=False. Templates with pipes, redirects or && run via shell=True
+        so the shell can interpret those operators. Either way every template
+        variable was quoted by _quote_kwargs and stays one argument, which
+        leaves the command itself to the JSON profile author.
 
         Standard input is /dev/null, never the caller's terminal: a command
         that tries to prompt gets EOF and fails instead of blocking forever
@@ -766,6 +791,7 @@ class FreedomNASEngine:
             command: Fully-formatted command string to execute
             timeout: Timeout in seconds
             check: If True, raise on non-zero exit code
+            needs_shell: Whether the template needs a shell
 
         Returns:
             Tuple[str, str]: (stdout, stderr)
@@ -774,7 +800,7 @@ class FreedomNASEngine:
             CommandExecutionError: If the command fails
         """
         try:
-            argv, use_shell = self._resolve_invocation(command)
+            argv, use_shell = self._resolve_invocation(command, needs_shell)
             result = subprocess.run(
                 argv,
                 shell=use_shell,
@@ -849,7 +875,7 @@ class FreedomNASEngine:
         """
         if category not in self.profile:
             return []
-        return list(self.profile[category].keys())
+        return [a for a in self.profile[category].keys() if a != "multi_args"]
     
     def __repr__(self) -> str:
         """String representation"""

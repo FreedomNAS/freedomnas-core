@@ -1,6 +1,8 @@
 """Tests for FreedomNASEngine — the OS-agnostic command translation layer."""
 
 import builtins
+import json
+import shlex
 import subprocess
 from io import StringIO
 from pathlib import Path
@@ -243,24 +245,58 @@ class TestGetCommand:
         assert "fly" in str(exc_info.value)
         assert "services" in str(exc_info.value)
 
-    def test_kwargs_are_sanitized(self):
+    def test_a_value_with_metacharacters_stays_one_argument(self):
         engine = make_engine("debian")
-        cmd = engine.get_command(
-            "services", "start",
-            service_name="samba; rm -rf /"
-        )
-        # _sanitize_kwargs strips shell metacharacters — `;` is removed.
-        # The remaining text is harmless because without `;` there is no
-        # second shell statement when the command runs via shlex (shell=False).
-        assert ";" not in cmd
+        cmd = engine.get_command("services", "start", service_name="samba; rm -rf /")
+        assert shlex.split(cmd) == ["systemctl", "start", "samba; rm -rf /"]
 
-    def test_injection_chars_stripped(self):
+    def test_a_value_with_spaces_stays_one_argument(self):
+        engine = make_engine("debian")
+        cmd = engine.get_command("zfs", "dataset_destroy", dataset="tank/old -r tank")
+        assert shlex.split(cmd) == ["zfs", "destroy", "tank/old -r tank"]
+
+    def test_plain_values_are_left_as_they_are(self):
+        engine = make_engine("debian")
+        assert engine.get_command("services", "start", service_name="samba") == (
+            "systemctl start samba"
+        )
+
+    def test_multi_args_become_one_argument_each(self):
         engine = make_engine("debian")
         cmd = engine.get_command(
-            "users", "delete",
-            username="bob|evil"
+            "zfs", "pool_add_cache", pool_name="tank", devices="/dev/sdb /dev/my disk"
         )
-        assert "|" not in cmd
+        assert shlex.split(cmd)[-3:] == ["/dev/sdb", "/dev/my", "disk"]
+
+    def test_an_empty_value_is_an_empty_argument(self):
+        engine = make_engine("debian")
+        cmd = engine.get_command("users", "create", username="bob", groups="")
+        assert shlex.split(cmd) == ["useradd", "-m", "-s", "/bin/bash", "-G", "", "bob"]
+
+    def test_an_empty_multi_arg_disappears(self):
+        engine = make_engine("debian")
+        cmd = engine.get_command(
+            "zfs", "pool_create", pool_name="tank", vdev_type="", devices="/dev/sdb",
+            ashift=12, compression="lz4",
+        )
+        assert shlex.split(cmd)[-2:] == ["tank", "/dev/sdb"]
+
+    def test_multi_args_is_not_an_action(self):
+        engine = make_engine("debian")
+        assert "multi_args" not in engine.list_actions("zfs")
+        with pytest.raises(CommandTranslationError):
+            engine.get_command("zfs", "multi_args")
+
+    @pytest.mark.parametrize("value", ["bob\nroot", "bob\rroot", "bob\0root"])
+    def test_control_characters_are_refused(self, value):
+        engine = make_engine("debian")
+        with pytest.raises(CommandTranslationError, match="control character"):
+            engine.get_command("users", "delete", username=value)
+
+    def test_a_single_argument_may_not_be_an_option(self):
+        engine = make_engine("debian")
+        with pytest.raises(CommandTranslationError, match="may not start with"):
+            engine.get_command("users", "delete", username="--help")
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +320,15 @@ class TestExecuteRouting:
             # shell=False: first arg is a list
             assert isinstance(args[0], list)
             assert kwargs.get("shell") is None or kwargs.get("shell") is False
+
+    def test_a_value_cannot_turn_the_shell_on(self):
+        engine = make_engine("debian")
+        mock_result = self._make_result()
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            engine.execute("services", "start", service_name="samba >/etc/shadow")
+            args, kwargs = mock_run.call_args
+            assert args[0] == ["systemctl", "start", "samba >/etc/shadow"]
+            assert not kwargs.get("shell")
 
     def test_pipe_command_uses_shell_true(self):
         engine = make_engine("debian")
@@ -457,7 +502,7 @@ class TestForTarget:
     def test_no_root_means_no_chroot_prefix(self):
         target = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
         assert target.chroot_prefix is None
-        argv, use_shell = target._resolve_invocation("apt-get update")
+        argv, use_shell = target._resolve_invocation("apt-get update", False)
         assert argv == ["apt-get", "update"]
         assert use_shell is False
 
@@ -469,7 +514,7 @@ class TestForTarget:
     def test_root_prefixes_every_command(self):
         target = FreedomNASEngine.for_target("debian", root="/mnt", profile_dir=PROFILES_DIR)
         assert target.chroot_prefix == "chroot /mnt"
-        argv, use_shell = target._resolve_invocation("apt-get update")
+        argv, use_shell = target._resolve_invocation("apt-get update", False)
         assert argv == ["chroot", "/mnt", "apt-get", "update"]
         assert use_shell is False
 
@@ -480,9 +525,15 @@ class TestForTarget:
         escape.
         """
         target = FreedomNASEngine.for_target("debian", root="/mnt", profile_dir=PROFILES_DIR)
-        argv, use_shell = target._resolve_invocation("echo 'a:b' | chpasswd")
+        argv, use_shell = target._resolve_invocation("echo 'a:b' | chpasswd", True)
         assert argv == ["chroot", "/mnt", "sh", "-c", "echo 'a:b' | chpasswd"]
         assert use_shell is False
+
+    def test_the_target_root_is_quoted(self):
+        target = FreedomNASEngine.for_target(
+            "debian", root="/mnt/new root", profile_dir=PROFILES_DIR
+        )
+        assert shlex.split(target.chroot_prefix) == ["chroot", "/mnt/new root"]
 
     def test_trailing_slash_is_stripped(self):
         target = FreedomNASEngine.for_target("debian", root="/mnt/", profile_dir=PROFILES_DIR)
@@ -512,7 +563,7 @@ class TestForTarget:
             "emerge --quiet --noreplace sys-fs/zfs"
         )
         argv, use_shell = target._resolve_invocation(
-            target.get_command("packages", "install", package_name="sys-fs/zfs")
+            target.get_command("packages", "install", package_name="sys-fs/zfs"), False
         )
         assert argv[:2] == ["chroot", "/mnt"]
         assert use_shell is False
@@ -529,3 +580,45 @@ class TestForTarget:
         assert target.get_command(
             "partitioning", "create_esp", disk="/dev/sda", esp_size="512MiB"
         ) == "sgdisk -n 1:0:+512MiB -t 1:EF00 /dev/sda"
+
+
+# ---------------------------------------------------------------------------
+# Quoting, end to end through a real shell
+# ---------------------------------------------------------------------------
+
+class TestQuotingThroughARealShell:
+    """The same values against sh itself, not against a mock of it."""
+
+    @pytest.fixture
+    def engine(self, tmp_path):
+        profiles = tmp_path / "profiles"
+        (profiles / "os").mkdir(parents=True)
+        (profiles / "os" / "os-debian.json").write_text(json.dumps({
+            "probe": {
+                "write": "printf '%s' {value} > {out}",
+                "argv": "touch {path}",
+            },
+        }))
+        return FreedomNASEngine.for_target("debian", profile_dir=str(profiles))
+
+    @pytest.mark.parametrize("value", [
+        "a; touch pwned",
+        "$(touch pwned)",
+        "`touch pwned`",
+        "x' ; touch pwned ; '",
+        'x" ; touch pwned ; "',
+        "a > pwned",
+        "a && touch pwned",
+    ])
+    def test_a_hostile_value_is_written_not_run(self, engine, tmp_path, monkeypatch, value):
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "out"
+        engine.execute("probe", "write", value=value, out=str(out))
+        assert out.read_text() == value
+        assert not (tmp_path / "pwned").exists()
+
+    def test_spaces_do_not_split_an_argument(self, engine, tmp_path):
+        target = tmp_path / "one file"
+        engine.execute("probe", "argv", path=str(target))
+        assert target.exists()
+        assert not (tmp_path / "one").exists()
