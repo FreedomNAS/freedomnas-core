@@ -1,6 +1,6 @@
 # Maintainer: FreedomNAS Team <dev@freedomnas.io>
 pkgname=freedomnas-core
-pkgver=4.0.0
+pkgver=1.0
 pkgrel=1
 pkgdesc="FreedomNAS Core Engine — OS-agnostic storage appliance"
 arch=('any')

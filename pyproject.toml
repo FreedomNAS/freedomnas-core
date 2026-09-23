@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freedomnas-core"
-version = "4.0.0"
+version = "1.0"
 description = "FreedomNAS core engine — OS abstraction, config, reconciler"
 readme = "README.md"
 requires-python = ">=3.8"
