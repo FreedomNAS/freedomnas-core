@@ -51,9 +51,13 @@ def _merged_profile(edition: str) -> dict:
         if fragment.exists():
             profile.update(json.loads(fragment.read_text()))
     init_system = profile.get("init_system", "systemd")
-    init = PROFILES / "init" / f"init-{init_system}.json"
-    if init.exists():
-        profile["services"] = json.loads(init.read_text())["services"]
+    # Per-edition first, exactly as _load_init_profile() does: runit on Artix
+    # is not runit on Void.
+    for name in (f"init-{init_system}-{edition}.json", f"init-{init_system}.json"):
+        init = PROFILES / "init" / name
+        if init.exists():
+            profile["services"] = json.loads(init.read_text())["services"]
+            break
     return profile
 
 

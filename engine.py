@@ -375,14 +375,23 @@ class FreedomNASEngine:
         """
         Load the init profile for the given init system.
 
-        Searches for {profile_dir}/init/{init_system}.json.
+        Searches for {profile_dir}/init/init-{init_system}-{os_type}.json
+        first, then init-{init_system}.json. The same init does not always
+        mean the same paths: runit services live in /etc/sv on Void and in
+        /etc/runit/sv on Artix, and are enabled into /var/service and
+        /etc/runit/runsvdir/default respectively.
 
         Returns:
             dict with the init profile, or None if not found.
         """
-        init_path = self.profile_dir / "init" / f"init-{init_system}.json"
-        if not init_path.exists():
-            logger.debug(f"Init profile not found: {init_path}")
+        init_dir = self.profile_dir / "init"
+        for name in (f"init-{init_system}-{self.os_type}.json",
+                     f"init-{init_system}.json"):
+            init_path = init_dir / name
+            if init_path.exists():
+                break
+        else:
+            logger.debug(f"Init profile not found for '{init_system}' in {init_dir}")
             return None
         try:
             with open(init_path, "r") as f:
