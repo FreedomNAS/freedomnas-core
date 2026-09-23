@@ -51,18 +51,20 @@ class StorageModule(FreedomNASModule):
         Returns True only when all known pools report ONLINE.
         """
         try:
-            output = self._engine.execute("zfs", "pool_list")
+            stdout, _ = self._engine.execute("zfs", "pool_list")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.warning("StorageModule health_check: pool_list failed: %s", exc)
             return False
 
-        # zpool list -Hp output: name  size  alloc  free  ckpoint  expandsz  frag  cap  dedup  health  altroot
-        for line in output.strip().splitlines():
+        # `zpool list -Hp -o name,size,alloc,free,capacity,health`: the
+        # profile names its columns, so health is the sixth and last one.
+        # Left to zpool's default order it moved between OpenZFS releases.
+        for line in stdout.strip().splitlines():
             parts = line.split("\t")
-            if len(parts) < 10:
+            if len(parts) < 6:
                 continue
             pool_name = parts[0]
-            health = parts[9].upper()
+            health = parts[5].upper()
             if pool_name in self._known_pools and health in _UNHEALTHY_STATES:
                 logger.error("Pool %s is in state: %s", pool_name, health)
                 return False
