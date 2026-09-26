@@ -25,6 +25,12 @@ from engine import (
 
 PROFILES_DIR = str(Path(__file__).parent.parent.parent / "freedomnas-profiles")
 
+# The arguments freedomnas-webui's api/routes/network.py hands to set_static_ip.
+WEBUI_STATIC_IP_ARGS = dict(
+    conn_name="fnas_lan", interface="fnas_lan", ip="192.168.1.50",
+    cidr="24", gateway="192.168.1.1", dns="1.1.1.1",
+)
+
 
 def os_release_open(os_release_content: str):
     """
@@ -232,13 +238,17 @@ class TestGetCommand:
 
     def test_freebsd_multi_step_set_static_ip(self):
         engine = make_engine("freebsd")
-        cmds = engine.get_command(
-            "network", "set_static_ip",
-            logical_name="fnas_lan", ip="192.168.1.50",
-            netmask="255.255.255.0", gateway="192.168.1.1",
-        )
+        cmds = engine.get_command("network", "set_static_ip", **WEBUI_STATIC_IP_ARGS)
         assert isinstance(cmds, list)
-        assert len(cmds) == 2
+        assert cmds[0] == 'sysrc ifconfig_fnas_lan="inet 192.168.1.50/24"'
+        assert "sysrc defaultrouter=192.168.1.1" in cmds
+
+    @pytest.mark.parametrize("edition", ["debian", "freebsd", "arch", "artix", "void", "gentoo"])
+    def test_set_static_ip_takes_what_the_webui_passes(self, edition):
+        """POST /api/network/interfaces/{name}/ip passes exactly these."""
+        engine = FreedomNASEngine.for_target(edition, profile_dir=PROFILES_DIR)
+        cmds = engine.get_command("network", "set_static_ip", **WEBUI_STATIC_IP_ARGS)
+        assert "192.168.1.50" in str(cmds)
 
     def test_unknown_category_raises(self):
         engine = make_engine("debian")
