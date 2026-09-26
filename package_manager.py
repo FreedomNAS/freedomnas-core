@@ -13,6 +13,11 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+try:
+    from freedomnas import paths
+except ImportError:  # running from the repository, not from the package
+    import paths  # type: ignore[no-redef]
+
 
 class PackageManager:
     """Manage OS-specific package definitions organized by category."""
@@ -27,12 +32,8 @@ class PackageManager:
         if packages_dir:
             self.packages_dir = Path(packages_dir)
         else:
-            # Try installed location first, then relative to this file
-            installed = Path("/usr/lib/freedomnas/profiles/packages")
-            if installed.exists():
-                self.packages_dir = installed
-            else:
-                self.packages_dir = Path(__file__).parent.parent / "freedomnas-profiles" / "packages"
+            profiles = paths.profiles_dir() or paths.profiles_candidates()[0]
+            self.packages_dir = profiles / "packages"
 
         if not self.packages_dir.exists():
             raise FileNotFoundError(f"Packages directory not found: {self.packages_dir}")

@@ -630,3 +630,10 @@ class TestQuotingThroughARealShell:
         engine.execute("probe", "argv", path=str(target))
         assert target.exists()
         assert not (tmp_path / "one").exists()
+
+
+def test_init_system_falls_back_to_the_profile_when_nothing_is_detected(monkeypatch):
+    """A container runs no init at all: the profile's declaration decides."""
+    engine = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    assert engine._detect_init_system({"init_system": "openrc"}) == "openrc"

@@ -7,7 +7,12 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+import paths
 from config import ConfigurationException, ConfigurationManager
+from engine import FreedomNASEngine
+
+PROFILES_DIR = str(Path(__file__).parent.parent.parent / "freedomnas-profiles")
+EDITIONS = ["debian", "freebsd", "arch", "artix", "void", "gentoo"]
 
 
 # ---------------------------------------------------------------------------
@@ -332,20 +337,27 @@ class TestDotNotationAccessors:
 class TestConfigPathDiscovery:
     """
     Where the configuration lives. The `.freedomnas` dataset is mounted at
-    /etc/freedomnas/state, so that is where the installer, the images and the
-    reconciler all read and write; a mismatch here makes the reconciler
-    silently apply defaults over a perfectly good configuration.
+    <config_dir>/state, config_dir coming from the OS profile, so that is
+    where the installer, the images and the reconciler all read and write; a
+    mismatch here makes the reconciler silently apply defaults over a
+    perfectly good configuration.
     """
 
-    def test_default_path_matches_the_mounted_dataset(self):
-        assert str(ConfigurationManager.DEFAULT_CONFIG_PATH) == (
-            "/etc/freedomnas/state/config.yaml"
-        )
+    @pytest.mark.parametrize("edition, config_dir", [
+        ("debian", "/etc/freedomnas"),
+        ("freebsd", "/usr/local/etc/freedomnas"),
+    ])
+    def test_paths_come_from_the_os_profile(self, monkeypatch, edition, config_dir):
+        engine = FreedomNASEngine.for_target(edition, profile_dir=PROFILES_DIR)
+        monkeypatch.setattr(paths, "_engine", lambda: engine)
+        assert str(ConfigurationManager.default_config_path()) == f"{config_dir}/state/config.yaml"
+        assert str(ConfigurationManager.backup_config_path()) == f"{config_dir}/config.yaml"
 
-    def test_backup_path_is_the_local_fallback(self):
-        assert str(ConfigurationManager.BACKUP_CONFIG_PATH) == (
-            "/etc/freedomnas/config.yaml"
-        )
+    @pytest.mark.parametrize("edition", EDITIONS)
+    def test_the_dataset_mounts_where_the_config_is_read(self, edition):
+        engine = FreedomNASEngine.for_target(edition, profile_dir=PROFILES_DIR)
+        command = engine.get_command("zfs", "create_state_dataset", pool_name="tank")
+        assert f"mountpoint={paths.state_dir(engine)} " in command
 
     def test_finds_the_dataset_copy_first(self, tmp_path, monkeypatch):
         primary = tmp_path / "state" / "config.yaml"

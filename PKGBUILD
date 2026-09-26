@@ -12,7 +12,6 @@ depends=(
     'python-yaml'
     'python-cryptography'
 )
-makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 optdepends=(
     'zfs: ZFS support (highly recommended)'
     'zfs-dkms: ZFS kernel module on non-LTS kernels'
@@ -21,14 +20,24 @@ source=("git+https://codeberg.org/freedomnas/freedomnas-core.git#tag=v${pkgver}"
 sha256sums=('SKIP')
 install=freedomnas-core.install
 
-build() {
-    cd "${srcdir}/${pkgname}"
-    python -m build --wheel --no-isolation
-}
-
+# The core goes where every edition puts it: the package directory under
+# /usr/lib/freedomnas/core, on sys.path through a .pth file. paths.py finds
+# the profiles and the WebUI from there, which a wheel in site-packages
+# could not.
 package() {
     cd "${srcdir}/${pkgname}"
-    python -m installer --destdir="${pkgdir}" dist/*.whl
+    local core_dir="${pkgdir}/usr/lib/freedomnas/core"
+    local site_dir
+    site_dir="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+
+    install -d "${core_dir}/freedomnas"
+    cp -r *.py modules "${core_dir}/freedomnas/"
+    find "${core_dir}" -name __pycache__ -prune -exec rm -rf {} +
+    python -m compileall -q -s "${pkgdir}" -p / "${core_dir}"
+
+    install -d "${pkgdir}${site_dir}"
+    echo /usr/lib/freedomnas/core > "${pkgdir}${site_dir}/freedomnas-core.pth"
+    install -Dm 755 bin/freedomnas "${pkgdir}/usr/bin/freedomnas"
 
     # The OS profiles are their own package (freedomnas-profiles) and are
     # installed to /usr/lib/freedomnas/profiles by it, not duplicated here.

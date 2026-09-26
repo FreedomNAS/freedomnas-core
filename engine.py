@@ -21,6 +21,11 @@ import threading
 from pathlib import Path
 from typing import Union, List, Dict, Any, Tuple, Optional
 
+try:
+    from freedomnas import paths
+except ImportError:  # running from the repository, not from the package
+    import paths  # type: ignore[no-redef]
+
 # Configure logging
 logger = logging.getLogger("FreedomNAS.Core")
 
@@ -312,26 +317,17 @@ class FreedomNASEngine:
         Returns:
             str: Path to the os_profiles directory
         """
-        # Try multiple locations to support both installer and webui
-        possible_paths = [
-            Path("/usr/lib/freedomnas/profiles"),                   # system install (spec §3.5)
-            Path(__file__).parent.parent / "freedomnas-profiles",   # dev sibling repo
-            Path(__file__).parent.parent / "os_profiles",           # dev local
-            Path(__file__).parent / "os_profiles",                  # dev local
-            Path("/opt/freedomnas/lib/os_profiles"),                 # alternative
-        ]
-        
-        for path in possible_paths:
-            if path.exists() and path.is_dir():
-                logger.debug(f"Using OS profiles directory: {path}")
-                return str(path)
-        
+        path = paths.profiles_dir()
+        if path is not None:
+            logger.debug(f"Using OS profiles directory: {path}")
+            return str(path)
+
         raise OSNotSupportedException(
             f"Could not find OS profiles directory. "
-            f"Searched: {', '.join(str(p) for p in possible_paths)}"
+            f"Searched: {', '.join(str(p) for p in paths.profiles_candidates())}"
         )
     
-    def _detect_init_system(self) -> str:
+    def _detect_init_system(self, profile: Dict[str, Any]) -> str:
         """
         Detect the running init system.
 
@@ -363,7 +359,7 @@ class FreedomNASEngine:
             return "bsd_rc"
 
         # Fallback: read from OS profile if present
-        declared = self.profile.get("init_system")
+        declared = profile.get("init_system")
         if declared:
             logger.debug(f"Init system not detected at runtime; using profile declaration: {declared}")
             return declared
@@ -481,7 +477,7 @@ class FreedomNASEngine:
         elif self._target_mode:
             init_system = profile.get("init_system", "systemd")
         else:
-            init_system = self._detect_init_system()
+            init_system = self._detect_init_system(profile)
 
         # Load and merge init profile
         init_profile = self._load_init_profile(init_system)

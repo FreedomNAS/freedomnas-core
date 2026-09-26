@@ -7,7 +7,7 @@ reversible base64, dozens of times a session. A self-signed certificate does
 not prove who the appliance is — nothing can, without a CA the browser knows —
 but it does stop the password from being readable by anyone on the network.
 
-Generated once at first boot, into /etc/freedomnas/tls. The fingerprint is
+Generated once at first boot, into <config_dir>/tls. The fingerprint is
 printed so it can be compared against what the browser shows the first time.
 """
 
@@ -15,11 +15,20 @@ import datetime
 import ipaddress
 import socket
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
-TLS_DIR = Path("/etc/freedomnas/tls")
-CERT_FILE = TLS_DIR / "cert.pem"
-KEY_FILE = TLS_DIR / "key.pem"
+try:
+    from freedomnas import paths
+except ImportError:  # running from the repository, not from the package
+    import paths  # type: ignore[no-redef]
+
+
+def cert_file() -> Path:
+    return paths.tls_dir() / "cert.pem"
+
+
+def key_file() -> Path:
+    return paths.tls_dir() / "key.pem"
 
 _VALID_YEARS = 10
 
@@ -31,12 +40,12 @@ def _names(hostname: str) -> Tuple[List[str], List[str]]:
     return dns, ["127.0.0.1", "::1"]
 
 
-def fingerprint(cert_path: Path = CERT_FILE) -> str:
+def fingerprint(cert_path: Optional[Path] = None) -> str:
     """The SHA-256 fingerprint, in the colon-separated form browsers show."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes
 
-    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    cert = x509.load_pem_x509_certificate((cert_path or cert_file()).read_bytes())
     return ":".join(f"{b:02X}" for b in cert.fingerprint(hashes.SHA256()))
 
 
@@ -48,7 +57,8 @@ def ensure_certificate(hostname: str = "") -> bool:
     replaced: regenerating on every boot would retrain the admin to click
     through a changing certificate, which is the opposite of the point.
     """
-    if CERT_FILE.exists() and KEY_FILE.exists():
+    tls_dir, cert_path, key_path = paths.tls_dir(), cert_file(), key_file()
+    if cert_path.exists() and key_path.exists():
         return False
 
     from cryptography import x509
@@ -84,14 +94,14 @@ def ensure_certificate(hostname: str = "") -> bool:
         .sign(key, hashes.SHA256())
     )
 
-    TLS_DIR.mkdir(parents=True, exist_ok=True)
-    TLS_DIR.chmod(0o700)
-    KEY_FILE.write_bytes(key.private_bytes(
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    tls_dir.chmod(0o700)
+    key_path.write_bytes(key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ))
-    KEY_FILE.chmod(0o600)
-    CERT_FILE.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-    CERT_FILE.chmod(0o644)
+    key_path.chmod(0o600)
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    cert_path.chmod(0o644)
     return True

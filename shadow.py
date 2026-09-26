@@ -12,7 +12,7 @@ mirrored into each of them. `firstboot.sh` looks for exactly that dataset
 when it comes up, which is what makes a reinstall onto a blank disk find its
 old self on the data pool.
 
-All the copies mount at the same place (/etc/freedomnas/state), only one at a
+All the copies mount at the same place (<config_dir>/state), only one at a
 time — which is why mirroring mounts them somewhere else for a moment, the
 same way the initramfs mounts the root dataset at /sysroot.
 """
@@ -25,13 +25,14 @@ from typing import Dict, List, Optional
 
 try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
+    from freedomnas import paths
 except ImportError:  # running from the repository, not from the package
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore
+    import paths  # type: ignore
 
 logger = logging.getLogger("FreedomNAS.Shadow")
 
 DATASET_NAME = ".freedomnas"
-STATE_DIR = "/etc/freedomnas/state"
 CONFIG_NAME = "config.yaml"
 
 
@@ -53,9 +54,9 @@ def _exists(engine, dataset: str) -> bool:
 
 
 def active_dataset(engine) -> Optional[str]:
-    """The `.freedomnas` currently mounted at /etc/freedomnas/state, if any."""
+    """The `.freedomnas` currently mounted at <config_dir>/state, if any."""
     try:
-        stdout, _ = engine.execute("zfs", "dataset_at_path", path=STATE_DIR, check=False)
+        stdout, _ = engine.execute("zfs", "dataset_at_path", path=str(paths.state_dir(engine)), check=False)
     except (CommandExecutionError, CommandTranslationError):
         return None
     name = stdout.strip()

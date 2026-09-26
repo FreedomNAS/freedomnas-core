@@ -3,14 +3,14 @@ Section: admin
 Priority: optional
 Maintainer: FreedomNAS Team <dev@freedomnas.io>
 Standards-Version: 4.6.2
-Build-Depends: debhelper-compat (= 13), python3-all, python3-setuptools, pybuild-plugin-pyproject
+Build-Depends: debhelper-compat (= 13), dh-python, python3
 Homepage: https://codeberg.org/freedomnas/freedomnas-core
 Vcs-Browser: https://codeberg.org/freedomnas/freedomnas-core
 Vcs-Git: https://codeberg.org/freedomnas/freedomnas-core.git
 
 Package: freedomnas-core
 Architecture: all
-Depends: ${python3:Depends}, python3 (>= 3.8), freedomnas-profiles
+Depends: ${python3:Depends}, ${misc:Depends}, python3 (>= 3.8), python3-yaml, python3-cryptography, freedomnas-profiles
 Recommends: zfsutils-linux | zfs-fuse
 Description: FreedomNAS Core Engine — OS-agnostic storage appliance
  The FreedomNAS Core Engine provides:

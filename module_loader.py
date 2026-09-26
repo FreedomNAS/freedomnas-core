@@ -29,10 +29,12 @@ try:
     from freedomnas.engine import FreedomNASEngine
     from freedomnas.config import ConfigurationManager
     from freedomnas.orchestrator import FreedomNASModule, Orchestrator
+    from freedomnas import paths
 except ImportError:
     from engine import FreedomNASEngine  # type: ignore[no-redef]
     from config import ConfigurationManager  # type: ignore[no-redef]
     from orchestrator import FreedomNASModule, Orchestrator  # type: ignore[no-redef]
+    import paths  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.ModuleLoader")
 
@@ -55,10 +57,7 @@ class ModuleLoader:
         Mirrors FreedomNASEngine._get_default_profile_dir(): try the system
         install location first, then dev-tree fallbacks.
         """
-        possible_paths = [
-            Path("/usr/lib/freedomnas/modules"),          # system install
-            Path(__file__).parent / "modules",             # dev local (this repo)
-        ]
+        possible_paths = paths.modules_candidates()
         for path in possible_paths:
             if path.exists() and path.is_dir():
                 logger.debug("Using modules directory: %s", path)

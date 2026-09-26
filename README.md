@@ -221,9 +221,15 @@ config.add_user({
 config.save()  # Saves atomically
 ```
 
-The configuration is stored in:
-1. ZFS dataset: `/etc/freedomnas/state/config.yaml` (primary — where `rpool/.freedomnas` mounts)
-2. Backup: `/etc/freedomnas/config.yaml` (fallback)
+The configuration is stored in, `<config_dir>` being the OS profile's
+`paths.config_dir` (`/etc/freedomnas` on Linux, `/usr/local/etc/freedomnas`
+on FreeBSD):
+1. ZFS dataset: `<config_dir>/state/config.yaml` (primary — where `rpool/.freedomnas` mounts)
+2. Backup: `<config_dir>/config.yaml` (fallback)
+
+`paths.py` resolves these, and finds the profiles relative to the core's own
+location (`<install_root>/core/freedomnas/`); `python3 -m freedomnas path
+<name>` prints them for shell scripts.
 
 ## Security
 

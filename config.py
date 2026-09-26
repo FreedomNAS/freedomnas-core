@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
+try:
+    from freedomnas import paths
+except ImportError:  # running from the repository, not from the package
+    import paths  # type: ignore[no-redef]
+
 logger = logging.getLogger("FreedomNAS.Config")
 
 
@@ -25,8 +30,9 @@ class ConfigurationManager:
     """
     Manages FreedomNAS system configuration stored in YAML format.
     
-    The configuration is stored in a ZFS dataset (.freedomnas) at:
-    /etc/freedomnas/state/config.yaml
+    The configuration is stored in a ZFS dataset (.freedomnas) mounted at
+    <config_dir>/state, config_dir being the OS profile's `paths.config_dir`
+    (/etc/freedomnas on Linux, /usr/local/etc/freedomnas on FreeBSD).
     
     This allows:
     - Configuration persistence across OS reinstallation
@@ -34,8 +40,9 @@ class ConfigurationManager:
     - Automated recovery of system state
     """
     
-    DEFAULT_CONFIG_PATH = Path("/etc/freedomnas/state/config.yaml")
-    BACKUP_CONFIG_PATH = Path("/etc/freedomnas/config.yaml")
+    # None means "from the OS profile"; tests point them somewhere else.
+    DEFAULT_CONFIG_PATH: Optional[Path] = None
+    BACKUP_CONFIG_PATH: Optional[Path] = None
     
     # Default configuration template
     DEFAULT_CONFIG = {
@@ -102,19 +109,32 @@ class ConfigurationManager:
         Raises:
             ConfigurationException: If no config file is found
         """
+        primary = self.default_config_path()
+        backup = self.backup_config_path()
+
         # Try primary location first (ZFS dataset)
-        if self.DEFAULT_CONFIG_PATH.exists():
-            logger.info(f"Found configuration at: {self.DEFAULT_CONFIG_PATH}")
-            return self.DEFAULT_CONFIG_PATH
-        
+        if primary.exists():
+            logger.info(f"Found configuration at: {primary}")
+            return primary
+
         # Try backup location
-        if self.BACKUP_CONFIG_PATH.exists():
-            logger.info(f"Found configuration at: {self.BACKUP_CONFIG_PATH}")
-            return self.BACKUP_CONFIG_PATH
-        
+        if backup.exists():
+            logger.info(f"Found configuration at: {backup}")
+            return backup
+
         # Return primary location (will create if needed)
-        logger.warning(f"No existing configuration found. Using default: {self.DEFAULT_CONFIG_PATH}")
-        return self.DEFAULT_CONFIG_PATH
+        logger.warning(f"No existing configuration found. Using default: {primary}")
+        return primary
+
+    @classmethod
+    def default_config_path(cls) -> Path:
+        """config.yaml on the mounted `.freedomnas` dataset."""
+        return cls.DEFAULT_CONFIG_PATH or paths.state_dir() / "config.yaml"
+
+    @classmethod
+    def backup_config_path(cls) -> Path:
+        """The local fallback, for a system with no pool to hold the dataset."""
+        return cls.BACKUP_CONFIG_PATH or paths.config_dir() / "config.yaml"
     
     def load(self) -> None:
         """

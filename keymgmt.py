@@ -41,16 +41,19 @@ try:
         CommandExecutionError,
         CommandTranslationError,
     )
+    from freedomnas import paths
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
         CommandExecutionError,
         CommandTranslationError,
     )
+    import paths  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.KeyMgmt")
 
-KEYSLOT_DIR = Path("/etc/freedomnas/keyslots")
+# None means <config_dir>/keyslots from the OS profile; tests point it elsewhere.
+KEYSLOT_DIR: Optional[Path] = None
 RUNTIME_KEY_DIR = Path("/run/freedomnas")
 USB_KEY_FILENAME = "freedomnas.key"
 USB_MOUNTPOINT = Path("/run/freedomnas/usbkey")
@@ -119,10 +122,10 @@ def unwrap_key(slot: dict, secret: bytes) -> bytes:
 
 class KeyslotStore:
     """
-    Persists wrapped-key slots for one pool at /etc/freedomnas/keyslots/<pool>.json.
+    Persists wrapped-key slots for one pool at <config_dir>/keyslots/<pool>.json.
 
     Must live outside the encrypted pool -- it has to be readable before the
-    pool is unlocked -- mirroring config.py's use of /etc/freedomnas as the
+    pool is unlocked -- mirroring config.py's use of <config_dir> as the
     boot-device shadow location.
     """
 
@@ -130,7 +133,7 @@ class KeyslotStore:
         # Resolved at call time, not bound as a default argument, so that
         # overriding the module-level KEYSLOT_DIR (e.g. in tests) takes effect.
         self.pool_name = pool_name
-        self.path = (base_dir or KEYSLOT_DIR) / f"{pool_name}.json"
+        self.path = (base_dir or KEYSLOT_DIR or paths.keyslot_dir()) / f"{pool_name}.json"
 
     def exists(self) -> bool:
         return self.path.exists()

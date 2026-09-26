@@ -7,6 +7,7 @@ Commands:
   unlock-pools  Unlock ZFS-encrypted pools (USB zero-touch, TTY passphrase fallback)
   reconcile     Apply configuration via the ReconciliationEngine
   serve         Load and start all modules under the Orchestrator, run until stopped
+  path          Print one of this edition's FreedomNAS directories
   version       Print package version
 """
 
@@ -206,8 +207,29 @@ def cmd_ensure_tls(args) -> int:
         return 1
 
     if created:
-        print(f"Created a self-signed certificate at {tls.CERT_FILE}")
+        print(f"Created a self-signed certificate at {tls.cert_file()}")
     print(f"Certificate fingerprint (SHA-256): {tls.fingerprint()}")
+    return 0
+
+
+def cmd_path(args) -> int:
+    try:
+        from freedomnas import paths
+    except ImportError:
+        import paths  # type: ignore
+
+    try:
+        resolve = {
+            "install-root": lambda: paths.INSTALL_ROOT,
+            "config":       paths.config_dir,
+            "state":        paths.state_dir,
+            "tls":          paths.tls_dir,
+            "keyslots":     paths.keyslot_dir,
+        }[args.name]
+        print(resolve())
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -354,6 +376,8 @@ def main() -> int:
         "--hostname", default="",
         help="Name to put in the certificate (default: the system hostname)",
     )
+    path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
+    path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots"])
     sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
     sub.add_parser("version", help="Print package version")
 
@@ -367,6 +391,7 @@ def main() -> int:
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
         "shadow-sync":  cmd_shadow_sync,
+        "path":         cmd_path,
         "serve":        cmd_serve,
         "version":      cmd_version,
     }

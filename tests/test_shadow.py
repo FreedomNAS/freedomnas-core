@@ -11,6 +11,8 @@ import shadow
 class FakeEngine:
     """Answers like ZFS, and remembers what was mounted where."""
 
+    profile = {"paths": {"config_dir": "/etc/freedomnas"}}
+
     def __init__(self, pools, datasets, active=None):
         self.pools = pools
         self.datasets = set(datasets)
@@ -23,7 +25,7 @@ class FakeEngine:
             return "\n".join(f"{p}\t1\t2" for p in self.pools), ""
         if action == "dataset_at_path":
             path = kwargs["path"]
-            if path == shadow.STATE_DIR:
+            if path == "/etc/freedomnas/state":
                 return (self.active or ""), ""
             return (path if path in self.datasets else ""), ""
         if action == "create_state_dataset":
