@@ -129,6 +129,28 @@ def cmd_unlock_pools(args) -> int:
     return 0
 
 
+def cmd_grow_root_pool(_args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas.grow import grow_root_pool
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        from grow import grow_root_pool  # type: ignore
+
+    try:
+        engine = get_engine()
+    except Exception as exc:
+        print(f"ERROR: could not initialise engine: {exc}", file=sys.stderr)
+        return 1
+
+    result = grow_root_pool(engine)
+    if result["grown"]:
+        print(f"Grew pool '{result['pool']}' to the end of {result['device']}")
+        return 0
+    print(f"Root pool not grown: {result['reason']}")
+    return 0
+
+
 def cmd_snapshot_run(args) -> int:
     try:
         from freedomnas.engine import get_engine
@@ -352,6 +374,10 @@ def main() -> int:
         default=None,
         help="Path to a desired-state YAML file (default: use the config.yaml shadow copy)",
     )
+    sub.add_parser(
+        "grow-root-pool",
+        help="Extend the root pool's partition and the pool to the end of the disk",
+    )
     snapshot_parser = sub.add_parser(
         "snapshot-run",
         help="Take and prune the scheduled snapshots for one interval (called from cron)",
@@ -387,6 +413,7 @@ def main() -> int:
         "status":       cmd_status,
         "check":        cmd_check,
         "unlock-pools": cmd_unlock_pools,
+        "grow-root-pool": cmd_grow_root_pool,
         "reconcile":    cmd_reconcile,
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
