@@ -286,6 +286,10 @@ class ReconciliationEngine:
             if feature.get("enabled"):
                 results.extend(self._do_service_enable(feature["id"]))
 
+        ssh_enabled = state.get("system", {}).get("ssh_enabled")
+        if ssh_enabled is not None:
+            results.extend(self._do_ssh(bool(ssh_enabled)))
+
         for share in state.get("smb_shares", []):
             results.append(self._do_smb_share_create(share))
 
@@ -563,6 +567,24 @@ class ReconciliationEngine:
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: services
     # ------------------------------------------------------------------
+
+    def _do_ssh(self, enabled: bool) -> List[ActionResult]:
+        """Turn SSH on or off as the configuration records it."""
+        try:
+            service_name = self.engine.get_profile_value("system", "ssh_service")
+        except CommandTranslationError as exc:
+            return [ActionResult(action="services.ssh", params={}, target_state="skipped", error=str(exc))]
+
+        results: List[ActionResult] = []
+        for action in (("enable", "start") if enabled else ("stop", "disable")):
+            params = {"service_name": service_name}
+            try:
+                self.engine.execute("services", action, service_name=service_name, check=enabled)
+                results.append(ActionResult(action=f"services.{action}", params=params, target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("Failed to %s service %s: %s", action, service_name, exc)
+                results.append(ActionResult(action=f"services.{action}", params=params, target_state="failed", error=str(exc)))
+        return results
 
     def _do_service_enable(self, feature_id: str) -> List[ActionResult]:
         """Enable and start the service associated with a feature ID."""

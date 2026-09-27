@@ -270,6 +270,27 @@ def test_disaster_recovery_skips_disabled_features():
     assert r.reconcile(mode="disaster_recovery") == []
 
 
+def test_disaster_recovery_turns_ssh_on_when_recorded():
+    engine = FakeEngine(service_names={("system", "ssh_service"): "sshd"})
+    r = reconciler(engine, FakeConfig(state={"system": {"ssh_enabled": True}}))
+    results = r.reconcile(mode="disaster_recovery")
+    assert action_names(results) == ["services.enable", "services.start"]
+    assert all(c[2]["service_name"] == "sshd" for c in engine.calls)
+
+
+def test_disaster_recovery_turns_ssh_off_when_recorded():
+    engine = FakeEngine(service_names={("system", "ssh_service"): "ssh"})
+    r = reconciler(engine, FakeConfig(state={"system": {"ssh_enabled": False}}))
+    results = r.reconcile(mode="disaster_recovery")
+    assert action_names(results) == ["services.stop", "services.disable"]
+
+
+def test_disaster_recovery_leaves_ssh_alone_when_not_recorded():
+    engine = FakeEngine(service_names={("system", "ssh_service"): "sshd"})
+    r = reconciler(engine, FakeConfig(state={"system": {"hostname": "nas"}}))
+    assert "services.enable" not in action_names(r.reconcile(mode="disaster_recovery"))
+
+
 # ---------------------------------------------------------------------------
 # Atomic actions — idempotence (safe to re-run)
 # ---------------------------------------------------------------------------
