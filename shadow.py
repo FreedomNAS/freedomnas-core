@@ -127,3 +127,49 @@ def _copy_into(engine, dataset: str, source: Path) -> Dict:
         except OSError:
             pass
     return result
+
+
+def activate(engine, pool: str, state: Optional[Path] = None) -> str:
+    """
+    Make `<pool>/.freedomnas` the live state: create it if needed, move what
+    the state directory holds into it, and mount it there.
+
+    This is how a system installed from an image, which ships without a
+    `.freedomnas`, gets one: the setup wizard writes the configuration to
+    the plain directory first, then hands it to the pool the administrator
+    chose. The copies left on the root filesystem are removed, so a boot
+    where the dataset fails to mount cannot serve a stale configuration.
+    """
+    dataset = f"{pool}/{DATASET_NAME}"
+    state = Path(state) if state else paths.state_dir(engine)
+    current = active_dataset(engine)
+    if current == dataset:
+        return dataset
+    if current:
+        raise CommandExecutionError(
+            f"the configuration is already served from {current}; moving it is not supported here"
+        )
+
+    ensure_dataset(engine, pool)
+    mountpoint = tempfile.mkdtemp(prefix="freedomnas-state.")
+    engine.execute("zfs", "mount_dataset_at", dataset=dataset, mountpoint=mountpoint)
+    try:
+        if state.is_dir():
+            shutil.copytree(state, mountpoint, dirs_exist_ok=True, symlinks=True)
+    finally:
+        engine.execute("zfs", "unmount_at", mountpoint=mountpoint, check=False)
+        try:
+            Path(mountpoint).rmdir()
+        except OSError:
+            pass
+
+    if state.is_dir():
+        for entry in state.iterdir():
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+    state.mkdir(parents=True, exist_ok=True)
+    engine.execute("zfs", "mount_dataset", dataset=dataset)
+    logger.info("The configuration now lives on %s", dataset)
+    return dataset
