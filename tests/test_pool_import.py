@@ -70,6 +70,14 @@ class FakeEngine:
         self.calls.append((action, kw))
         if action in self.failing:
             raise CommandExecutionError(f"{action} failed")
+        if action == "dataset_get_property":
+            value = getattr(self, "keyslots", None)
+            return (f"{value}\tlocal" if value else "-\t-"), ""
+        if action == "load_key_file":
+            self.unlocked.add(kw["pool_name"].split("/", 1)[1] if "/" in kw["pool_name"] else "")
+            return "", ""
+        if action == "pool_export":
+            self.unlocked.clear()
         if action == "pool_importable":
             return self.listing, ""
         if action == "dataset_tree":
@@ -291,3 +299,101 @@ def test_an_explicit_mountpoint_is_set_back_as_it_was():
         pool_import.import_pool(engine, "42", "tank", root_mountpoint="/mnt/data")
     sets = [kw["value"] for a, kw in engine.calls if a == "dataset_set"]
     assert sets == ["/mnt/data", "/data/tank"]
+
+
+import keymgmt
+
+RAW_KEY = b"k" * 32
+
+
+@pytest.fixture
+def raw_pool(tmp_path, monkeypatch):
+    monkeypatch.setattr(keymgmt, "KEYSLOT_DIR", tmp_path / "keyslots")
+    monkeypatch.setattr(keymgmt, "RUNTIME_KEY_DIR", tmp_path / "run")
+    slots = {"pool": "tank", "slots": {
+        "passphrase": keymgmt.wrap_key(RAW_KEY, b"master passphrase"),
+        "usb": keymgmt.wrap_key(RAW_KEY, b"stick-secret"),
+    }}
+
+    class Raw(FakeEngine):
+        def execute(self, category, action, timeout=30, check=True, **kw):
+            if action == "dataset_tree":
+                self.rows = [("", "/tank", "default", "on", {
+                    "encryption": "aes-256-gcm", "encryptionroot": kw["pool_name"],
+                    "keyformat": "raw", "keystatus": "unavailable"})]
+            return super().execute(category, action, timeout, check, **kw)
+
+    engine = Raw()
+    engine.keyslots = keymgmt.encode_keyslots(slots)
+    return engine, slots
+
+
+def test_a_freedomnas_encrypted_pool_offers_its_unlock_methods(raw_pool):
+    engine, _ = raw_pool
+    report = pool_import.inspect(engine, "42", occupied=free)
+    [root] = report["encryption_roots"]
+    assert root["unlock_methods"] == ["usb", "file", "passphrase"]
+    assert root["blocking"] and not root["unlocked"]
+
+
+@pytest.mark.parametrize("unlock, ok", [
+    ({"method": "passphrase", "passphrase": "master passphrase"}, True),
+    ({"method": "passphrase", "passphrase": "not it"}, False),
+    ({"method": "file", "key": "c3RpY2stc2VjcmV0"}, True),
+    ({"method": "file", "key": "b3RoZXI="}, False),
+    ({"method": "file", "key": "not base64!"}, False),
+])
+def test_the_master_passphrase_or_the_key_file_opens_it(raw_pool, unlock, ok):
+    engine, _ = raw_pool
+    report = pool_import.inspect(engine, "42", keyslot_unlock=unlock, occupied=free)
+    [root] = report["encryption_roots"]
+    assert root["unlocked"] is ok
+    assert bool(root.get("blocking")) is not ok
+
+
+def test_the_usb_key_plugged_in_opens_it(raw_pool, monkeypatch):
+    engine, _ = raw_pool
+    monkeypatch.setattr(keymgmt.PoolUnlocker, "find_usb_key", lambda self, slot: RAW_KEY)
+    report = pool_import.inspect(engine, "42", keyslot_unlock={"method": "usb"}, occupied=free)
+    assert report["encryption_roots"][0]["unlocked"]
+    monkeypatch.setattr(keymgmt.PoolUnlocker, "find_usb_key", lambda self, slot: None)
+    report = pool_import.inspect(engine, "42", keyslot_unlock={"method": "usb"}, occupied=free)
+    assert "no USB key" in report["encryption_roots"][0]["error"]
+
+
+def test_an_imported_pool_leaves_its_keyslots_here(raw_pool):
+    engine, slots = raw_pool
+    result = pool_import.import_pool(engine, "42", "vault",
+                                     keyslot_unlock={"method": "passphrase", "passphrase": "master passphrase"})
+    assert result["adopted_keyslots"]
+    saved = keymgmt.KeyslotStore("vault").load()
+    assert saved["pool"] == "vault" and saved["slots"] == slots["slots"]
+
+
+def test_a_locked_freedomnas_pool_is_not_imported(raw_pool):
+    engine, _ = raw_pool
+    with pytest.raises(ImportProblem, match="USB key or its Master Passphrase"):
+        pool_import.import_pool(engine, "42", "tank")
+    assert engine.actions()[-1] == "pool_export"
+
+
+def test_a_locked_configuration_is_not_read(raw_pool, monkeypatch):
+    engine, _ = raw_pool
+
+    class Locked(type(engine)):
+        def execute(self, category, action, timeout=30, check=True, **kw):
+            out = super().execute(category, action, timeout, check, **kw)
+            if action == "dataset_tree":
+                pool = kw["pool_name"]
+                extra = [f"{pool}/.freedomnas\t{p}\t{v}\t{src}" for p, v, src in (
+                    ("mountpoint", "/etc/freedomnas/state", "local"), ("canmount", "noauto", "local"),
+                    ("encryption", "aes-256-gcm", "-"), ("encryptionroot", pool, "-"),
+                    ("keyformat", "raw", "-"), ("keystatus", "unavailable", "-"))]
+                return out[0] + "\n" + "\n".join(extra), ""
+            return out
+    locked = Locked()
+    locked.keyslots = engine.keyslots
+    read = []
+    monkeypatch.setattr(pool_import, "_read_config", lambda *a: read.append(a) or ({}, None))
+    report = pool_import.inspect(locked, "42", occupied=free)
+    assert report["freedomnas"] and report["config_locked"] and read == []

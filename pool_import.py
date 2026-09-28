@@ -15,6 +15,8 @@ inherits an unfortunate mountpoint is a conflict instead, which choosing
 another mountpoint for the pool resolves.
 """
 
+import base64
+import binascii
 import logging
 import os
 import posixpath
@@ -27,9 +29,10 @@ import yaml
 
 try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
-    from freedomnas import shadow
+    from freedomnas import keymgmt, shadow
 except ImportError:  # running from the repository, not from the package
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore
+    import keymgmt  # type: ignore
     import shadow  # type: ignore
 
 logger = logging.getLogger("FreedomNAS.PoolImport")
@@ -217,28 +220,91 @@ def _full(pool: str, rel: str) -> str:
     return f"{pool}/{rel}" if rel else pool
 
 
-def _load_keys(engine, pool: str, roots: List[Dict], passphrases: Dict[str, str]) -> None:
+def _load_keys(engine, pool: str, roots: List[Dict], passphrases: Dict[str, str],
+               keyslot_unlock: Optional[Dict] = None) -> Dict[str, Dict]:
+    """
+    Unlock what can be unlocked. Each root gets `error` and, when the error
+    must stop an import, `blocking`. Returns the keyslots that opened a root,
+    by root.
+    """
+    opened: Dict[str, Dict] = {}
     for root in roots:
-        if root["unlocked"]:
-            continue
+        root.pop("error", None)
+        root.pop("blocking", None)
+        full = _full(pool, root["dataset"])
         if root["keyformat"] != "passphrase":
-            root["error"] = (f"its key is {root['keyformat'] or 'not a passphrase'}: "
-                             "it cannot be unlocked here and will stay locked")
+            slots = keymgmt.pool_keyslots(engine, full) if root["keyformat"] else None
+            root["unlock_methods"] = _unlock_methods(slots)
+            if root["unlocked"]:
+                continue
+            if not slots:
+                root["error"] = (f"its key is {root['keyformat'] or 'not a passphrase'}: "
+                                 "it cannot be unlocked here and will stay locked")
+                continue
+            raw_key, problem = _open_keyslot(engine, slots, keyslot_unlock)
+            if raw_key is None:
+                root["error"], root["blocking"] = problem, True
+                continue
+            try:
+                keymgmt.load_raw_key(engine, full, raw_key)
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                root["error"], root["blocking"] = f"the key did not load: {exc}", True
+                continue
+            root["unlocked"] = True
+            opened[root["dataset"]] = slots
+            continue
+        if root["unlocked"]:
             continue
         passphrase = passphrases.get(root["dataset"], "")
         if not passphrase:
-            root["error"] = "passphrase required"
+            root["error"], root["blocking"] = "passphrase required", True
             continue
         if any(c in passphrase for c in "\n\r\0"):
-            root["error"] = "the passphrase may not contain line breaks"
+            root["error"], root["blocking"] = "the passphrase may not contain line breaks", True
             continue
         try:
-            engine.execute_with_stdin("zfs", "load_key_prompt", passphrase + "\n",
-                                      dataset=_full(pool, root["dataset"]))
+            engine.execute_with_stdin("zfs", "load_key_prompt", passphrase + "\n", dataset=full)
             root["unlocked"] = True
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.info("Wrong key for %s: %s", root["dataset"], exc)
-            root["error"] = "wrong passphrase"
+            root["error"], root["blocking"] = "wrong passphrase", True
+    return opened
+
+
+def _unlock_methods(slots: Optional[Dict]) -> List[str]:
+    if not slots:
+        return []
+    methods = []
+    if "usb" in slots["slots"]:
+        methods += ["usb", "file"]
+    if "passphrase" in slots["slots"]:
+        methods.append("passphrase")
+    return methods
+
+
+def _open_keyslot(engine, slots: Dict, unlock: Optional[Dict]) -> Tuple[Optional[bytes], str]:
+    """The raw key from one of the pool's keyslots, or None and why not."""
+    method = (unlock or {}).get("method")
+    usb_slot = slots["slots"].get("usb")
+    passphrase_slot = slots["slots"].get("passphrase")
+    if method == "usb" and usb_slot:
+        raw_key = keymgmt.PoolUnlocker(engine).find_usb_key(usb_slot)
+        return (raw_key, "") if raw_key else (None, "no USB key plugged into this system opens it")
+    if method == "file" and usb_slot:
+        try:
+            secret = base64.b64decode(unlock.get("key") or "", validate=True)
+        except (binascii.Error, ValueError):
+            return None, "the freedomnas.key file could not be read"
+        try:
+            return keymgmt.unwrap_key(usb_slot, secret), ""
+        except keymgmt.SlotUnavailableError:
+            return None, "this freedomnas.key does not open it"
+    if method == "passphrase" and passphrase_slot:
+        try:
+            return keymgmt.unwrap_key(passphrase_slot, (unlock.get("passphrase") or "").encode("utf-8")), ""
+        except keymgmt.SlotUnavailableError:
+            return None, "wrong Master Passphrase"
+    return None, "unlock it with its USB key or its Master Passphrase"
 
 
 def _tree(engine, pool: str) -> List[Dict]:
@@ -341,10 +407,10 @@ def _find(engine, pool_id: str) -> Dict:
 
 
 def _survey(engine, pool: str, final_name: str, root_mountpoint: Optional[str],
-            passphrases: Dict[str, str], occupied) -> Dict:
+            passphrases: Dict[str, str], occupied, keyslot_unlock: Optional[Dict] = None) -> Dict:
     datasets = _tree(engine, pool)
     roots = encryption_roots(datasets)
-    _load_keys(engine, pool, roots, passphrases)
+    _load_keys(engine, pool, roots, passphrases, keyslot_unlock)
     if any(r["unlocked"] for r in roots):
         datasets = _tree(engine, pool)
     projected = project_mountpoints(datasets, final_name, root_mountpoint)
@@ -370,7 +436,8 @@ def _survey(engine, pool: str, final_name: str, root_mountpoint: Optional[str],
 
 def inspect(engine, pool_id: str, name: Optional[str] = None, force: bool = False,
             root_mountpoint: Optional[str] = None, passphrases: Optional[Dict[str, str]] = None,
-            occupied: Optional[Callable[[str], Optional[str]]] = None) -> Dict:
+            occupied: Optional[Callable[[str], Optional[str]]] = None,
+            keyslot_unlock: Optional[Dict] = None) -> Dict:
     """
     Look at an importable pool without changing it. Raises ImportProblem
     when it cannot even be looked at.
@@ -392,11 +459,14 @@ def inspect(engine, pool_id: str, name: Optional[str] = None, force: bool = Fals
     except (CommandExecutionError, CommandTranslationError) as exc:
         raise ImportProblem(f"Could not open {found['name']}: {exc}")
     try:
-        report = _survey(engine, temp, final_name, root_mountpoint, passphrases or {}, occupied)
+        report = _survey(engine, temp, final_name, root_mountpoint, passphrases or {}, occupied,
+                         keyslot_unlock)
         original = project_mountpoints(report["_datasets"], found["name"])
         report["current_root_mountpoint"] = original.get("", "none")
         config, config_error = (None, None)
-        if report["freedomnas"]:
+        state = next((d for d in report["datasets"] if d["dataset"] == shadow.DATASET_NAME), None)
+        report["config_locked"] = bool(state and state["locked"])
+        if report["freedomnas"] and not report["config_locked"]:
             config, config_error = _read_config(engine, temp)
         report["config_error"] = config_error
         if config is not None:
@@ -415,7 +485,8 @@ def inspect(engine, pool_id: str, name: Optional[str] = None, force: bool = Fals
 
 def import_pool(engine, pool_id: str, name: str, force: bool = False,
                 root_mountpoint: Optional[str] = None,
-                passphrases: Optional[Dict[str, str]] = None) -> Dict:
+                passphrases: Optional[Dict[str, str]] = None,
+                keyslot_unlock: Optional[Dict] = None) -> Dict:
     """
     Import the pool for good under `name`, unlock it, move its mountpoint if
     asked and mount it. On any failure the pool is exported again and
@@ -433,8 +504,8 @@ def import_pool(engine, pool_id: str, name: str, force: bool = False,
         if refused:
             raise ImportProblem("It holds another system's root: " + "; ".join(refused))
         roots = encryption_roots(datasets)
-        _load_keys(engine, name, roots, passphrases or {})
-        wrong = [r for r in roots if r.get("error") in ("wrong passphrase", "passphrase required")]
+        opened = _load_keys(engine, name, roots, passphrases or {}, keyslot_unlock)
+        wrong = [r for r in roots if r.get("blocking")]
         if wrong:
             raise ImportProblem(f"{wrong[0]['dataset'] or name}: {wrong[0]['error']}")
         current = project_mountpoints(datasets, name).get("", "none")
@@ -452,7 +523,14 @@ def import_pool(engine, pool_id: str, name: str, force: bool = False,
         if isinstance(exc, ImportProblem):
             raise
         raise ImportProblem(f"Could not bring {name} in: {exc}")
-    return {"pool": name, "encryption_roots": roots, "kept_config": kept}
+    adopted = False
+    if "" in opened:
+        try:
+            adopted = keymgmt.adopt_keyslots(name, opened[""])
+        except OSError as exc:
+            logger.warning("Could not keep the keyslots of %s here: %s", name, exc)
+    return {"pool": name, "encryption_roots": roots, "kept_config": kept,
+            "adopted_keyslots": adopted}
 
 
 def _restore_mountpoint(engine, pool: str, was: str) -> None:

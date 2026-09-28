@@ -22,6 +22,8 @@ All ZFS/OS operations delegate to FreedomNASEngine; no subprocess calls here.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -57,6 +59,7 @@ KEYSLOT_DIR: Optional[Path] = None
 RUNTIME_KEY_DIR = Path("/run/freedomnas")
 USB_KEY_FILENAME = "freedomnas.key"
 USB_MOUNTPOINT = Path("/run/freedomnas/usbkey")
+KEYSLOT_PROPERTY = "org.freedomnas:keyslots"
 
 # scrypt cost parameters: ~32 MiB / attempt, appropriate for a boot-time
 # unlock (a handful of attempts, not an offline password database).
@@ -168,6 +171,96 @@ class KeyslotStore:
 
 
 # ----------------------------------------------------------------------
+# The keyslots' copy on the pool itself
+#
+# The file on the boot device is lost with the boot device, and a pool moved
+# to another system leaves it behind. So the same slots are also kept in a
+# ZFS user property of the pool's own dataset: properties are not encrypted,
+# so they can be read before the pool is unlocked — the model LUKS uses for
+# its header. The slots hold only wrapped copies of the key.
+# ----------------------------------------------------------------------
+
+def encode_keyslots(data: dict) -> str:
+    text = json.dumps(data, separators=(",", ":"), sort_keys=True)
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def decode_keyslots(value: str) -> Optional[dict]:
+    try:
+        data = json.loads(base64.b64decode(value, validate=True).decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("slots"), dict) else None
+
+
+def pool_keyslots(engine: FreedomNASEngine, dataset: str) -> Optional[dict]:
+    """The keyslots recorded on a pool's dataset, or None."""
+    try:
+        stdout, _ = engine.execute(
+            "zfs", "dataset_get_property", property=KEYSLOT_PROPERTY, dataset=dataset, check=False
+        )
+    except (CommandExecutionError, CommandTranslationError):
+        return None
+    value = stdout.split("\t")[0].strip()
+    if not value or value == "-":
+        return None
+    return decode_keyslots(value)
+
+
+def publish_keyslots(engine: FreedomNASEngine, pool_name: str) -> bool:
+    """
+    Copy this system's keyslots for pool_name onto the pool. Returns True if
+    the pool holds them afterwards; never raises.
+    """
+    store = KeyslotStore(pool_name)
+    if not store.exists():
+        return False
+    try:
+        data = store.load()
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot read the keyslots of %s: %s", pool_name, exc)
+        return False
+    if pool_keyslots(engine, pool_name) == data:
+        return True
+    try:
+        engine.execute(
+            "zfs", "dataset_set",
+            property=KEYSLOT_PROPERTY, value=encode_keyslots(data), dataset=pool_name,
+        )
+    except (CommandExecutionError, CommandTranslationError) as exc:
+        logger.warning("Could not record the keyslots on %s: %s", pool_name, exc)
+        return False
+    logger.info("Recorded the keyslots of %s on the pool", pool_name)
+    return True
+
+
+def adopt_keyslots(pool_name: str, data: dict) -> bool:
+    """
+    Give this system the keyslots of a pool it imported, so the boot-time
+    unlock (USB key, console passphrase) works for it. A pool that already
+    has a keyslot file here keeps it.
+    """
+    store = KeyslotStore(pool_name)
+    if store.exists():
+        return False
+    store.save({**data, "pool": pool_name, "adopted_at": datetime.now().isoformat()})
+    return True
+
+
+def removable_partitions(engine: FreedomNASEngine) -> List[str]:
+    return PoolUnlocker(engine).removable_partitions()
+
+
+def load_raw_key(engine: FreedomNASEngine, dataset: str, raw_key: bytes) -> None:
+    """Load an unwrapped key into an encryption root. Raises on failure."""
+    keyfile = _write_transient_keyfile(dataset.replace("/", "_"), raw_key)
+    try:
+        engine.execute("zfs", "load_key_file", pool_name=dataset, keyfile_path=str(keyfile))
+    finally:
+        _shred(keyfile)
+
+
+# ----------------------------------------------------------------------
 # Unlock at boot: USB zero-touch, TTY passphrase fallback
 # ----------------------------------------------------------------------
 
@@ -219,19 +312,26 @@ class PoolUnlocker:
             logger.info("No USB keyslot configured for pool %s", pool_name)
             return False
 
+        raw_key = self.find_usb_key(slot)
+        if raw_key is None:
+            logger.info("No matching USB key found for pool %s", pool_name)
+            return False
+        return self._load_raw_key(pool_name, raw_key)
+
+    def find_usb_key(self, slot: dict) -> Optional[bytes]:
+        """The raw key from the first USB stick whose freedomnas.key opens slot."""
         for device in self._list_removable_devices():
             key_bytes = self._read_usb_key(device)
             if key_bytes is None:
                 continue
             try:
-                raw_key = unwrap_key(slot, key_bytes)
+                return unwrap_key(slot, key_bytes)
             except SlotUnavailableError:
-                logger.warning("USB key on %s did not match the keyslot for %s", device, pool_name)
-                continue
-            return self._load_raw_key(pool_name, raw_key)
+                logger.warning("USB key on %s did not match the keyslot", device)
+        return None
 
-        logger.info("No matching USB key found for pool %s", pool_name)
-        return False
+    def removable_partitions(self) -> List[str]:
+        return self._list_removable_devices()
 
     def _list_removable_devices(self) -> List[str]:
         try:
@@ -370,21 +470,19 @@ class PoolUnlocker:
     # ---- shared: load an unwrapped raw key into the pool ------------------
 
     def _load_raw_key(self, pool_name: str, raw_key: bytes) -> bool:
-        keyfile = _write_transient_keyfile(pool_name, raw_key)
         try:
-            self.engine.execute("zfs", "load_key_file", pool_name=pool_name, keyfile_path=str(keyfile))
+            load_raw_key(self.engine, pool_name, raw_key)
             # Only this pool's datasets: `zfs mount -a` would also mount every
             # other imported pool, including one belonging to another system.
             # And only those meant to mount by themselves: `.freedomnas` is
             # canmount=noauto and would land on this system's state directory.
             self.engine.execute("zfs", "mount_pool_auto", pool_name=pool_name, check=False)
-            logger.info("Unlocked ZFS pool: %s", pool_name)
-            return True
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to load key for pool %s: %s", pool_name, exc)
             return False
-        finally:
-            _shred(keyfile)
+        logger.info("Unlocked ZFS pool: %s", pool_name)
+        publish_keyslots(self.engine, pool_name)
+        return True
 
 
 # ----------------------------------------------------------------------
@@ -434,6 +532,7 @@ class PoolProvisioner:
         store = KeyslotStore(pool_name)
         store.set_slot("passphrase", wrap_key(raw_key, master_passphrase.encode("utf-8")))
         store.set_slot("usb", wrap_key(raw_key, usb_key_bytes))
+        publish_keyslots(self.engine, pool_name)
 
         for device in usb_devices or []:
             self._write_usb_key(device, usb_key_bytes)

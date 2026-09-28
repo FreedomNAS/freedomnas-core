@@ -23,6 +23,7 @@ class FakeEngine:
         self.removable = list(removable)  # (name, removable, type)
         self.failing = set(failing)
         self.calls = []
+        self.properties = {}
 
     def execute(self, category, action, **kwargs):
         self.calls.append((category, action, kwargs))
@@ -39,6 +40,12 @@ class FakeEngine:
             return "", ""
         if (category, action) == ("media", "unmount"):
             return "", ""
+        if (category, action) == ("zfs", "dataset_set"):
+            self.properties[(kwargs["dataset"], kwargs["property"])] = kwargs["value"]
+            return "", ""
+        if (category, action) == ("zfs", "dataset_get_property"):
+            value = self.properties.get((kwargs["dataset"], kwargs["property"]))
+            return (f"{value}\tlocal" if value else "-\t-"), ""
         if (category, action) in (("zfs", "load_key_file"), ("zfs", "mount_pool_auto"),
                                    ("zfs", "pool_create_encrypted")):
             return "", ""
@@ -386,6 +393,60 @@ def test_shred_removes_the_key_even_when_it_cannot_overwrite_it(tmp_path):
     keymgmt._shred(keyfile)
 
     assert not keyfile.exists()
+
+
+# ---------------------------------------------------------------------------
+# The keyslots' copy on the pool
+# ---------------------------------------------------------------------------
+
+def test_a_new_encrypted_pool_carries_its_keyslots(paths):
+    keyslot_dir, _, _ = paths
+    engine = FakeEngine()
+    keymgmt.PoolProvisioner(engine).create_encrypted_pool(
+        pool_name="tank", vdev_type="", devices="/dev/sdb", master_passphrase="a long passphrase")
+    on_pool = keymgmt.pool_keyslots(engine, "tank")
+    assert on_pool == json.loads((keyslot_dir / "tank.json").read_text())
+    assert set(on_pool["slots"]) == {"passphrase", "usb"}
+
+
+def test_an_older_pool_gets_its_copy_when_unlocked(paths):
+    raw_key = os.urandom(32)
+    store = keymgmt.KeyslotStore("tank")
+    store.set_slot("usb", keymgmt.wrap_key(raw_key, b"usb-secret"))
+    engine = FakeEngine()
+    assert keymgmt.pool_keyslots(engine, "tank") is None
+    assert keymgmt.PoolUnlocker(engine)._load_raw_key("tank", raw_key)
+    assert keymgmt.pool_keyslots(engine, "tank") == store.load()
+    sets = [c for c in engine.calls if c[1] == "dataset_set"]
+    keymgmt.publish_keyslots(engine, "tank")
+    assert [c for c in engine.calls if c[1] == "dataset_set"] == sets
+
+
+def test_a_damaged_property_reads_as_none():
+    assert keymgmt.decode_keyslots("not base64!") is None
+    assert keymgmt.decode_keyslots(keymgmt.encode_keyslots({"slots": {}})) == {"slots": {}}
+    assert keymgmt.decode_keyslots(keymgmt.encode_keyslots({"no": "slots"})) is None
+
+
+def test_adopted_keyslots_take_the_new_name_and_never_overwrite(paths):
+    data = {"pool": "oldname", "slots": {"passphrase": {"salt": "00"}}}
+    assert keymgmt.adopt_keyslots("tank", data)
+    saved = keymgmt.KeyslotStore("tank").load()
+    assert saved["pool"] == "tank" and saved["slots"] == data["slots"]
+    assert not keymgmt.adopt_keyslots("tank", {"pool": "x", "slots": {}})
+    assert keymgmt.KeyslotStore("tank").load()["slots"] == data["slots"]
+
+
+def test_the_usb_key_is_found_for_a_slot(paths):
+    _, _, usb_mount = paths
+    raw_key = os.urandom(32)
+    slot = keymgmt.wrap_key(raw_key, b"stick-bytes")
+    engine = FakeEngine(removable=[("sdz1", "1", "part")])
+    usb_mount.mkdir(parents=True)
+    (usb_mount / keymgmt.USB_KEY_FILENAME).write_bytes(b"stick-bytes")
+    assert keymgmt.PoolUnlocker(engine).find_usb_key(slot) == raw_key
+    (usb_mount / keymgmt.USB_KEY_FILENAME).write_bytes(b"another stick")
+    assert keymgmt.PoolUnlocker(engine).find_usb_key(slot) is None
 
 
 def test_an_unlocked_pool_never_mounts_its_state_dataset(paths):
