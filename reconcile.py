@@ -1,10 +1,13 @@
 """
 FreedomNAS Reconciliation Engine
 
-Applies configuration from config.yaml to bring a freshly installed OS to the
-desired state. Used by the (parked) installer and by freedomnas-image-builder's
-baked-in firstboot.sh (via `python -m freedomnas reconcile`, see __main__.py)
-— never by the WebUI directly.
+Brings the running system to the state config.yaml describes. Used by
+firstboot.sh at every boot (via `python -m freedomnas reconcile`, see
+__main__.py) and by the WebUI when a configuration is loaded.
+
+The current state is read from the system itself (`observe()`), never from
+config.yaml: the configuration says what should be, only the system can say
+what is.
 
 All OS operations delegate to FreedomNASEngine; no subprocess calls here.
 """
@@ -13,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
@@ -36,17 +39,25 @@ logger = logging.getLogger("FreedomNAS.Reconciler")
 
 
 class ReconcileMode(str, Enum):
-    HYBRID = "hybrid"
     DECLARATIVE = "declarative"
-    DISASTER_RECOVERY = "disaster_recovery"
+    ADDITIVE = "additive"
+
+
+# firstboot.sh is copied into every installed system, and the copies made
+# before the modes were merged still ask for disaster_recovery.
+_MODE_ALIASES = {"disaster_recovery": ReconcileMode.DECLARATIVE}
+
+
+def parse_mode(mode: str) -> ReconcileMode:
+    return _MODE_ALIASES.get(mode) or ReconcileMode(mode)
 
 
 @dataclass
 class Change:
-    path: str        # dot-notation: "system.hostname", "users.admin", "smb_shares.media"
+    path: str        # dot-notation: "system.hostname", "users.alice", "smb_shares.media"
     old_value: Any
     new_value: Any
-    change_type: str  # "add" | "remove" | "modify"
+    change_type: str  # "add" | "modify" | "remove" | "ensure"
 
 
 @dataclass
@@ -65,22 +76,48 @@ _FEATURE_SERVICE_MAP: Dict[str, tuple] = {
 }
 
 
+def _normalize(state: dict) -> dict:
+    """config.yaml keeps shares under shares.smb/nfs; the plan reads them flat."""
+    shares = state.get("shares") or {}
+    return {
+        **state,
+        "smb_shares": state.get("smb_shares", shares.get("smb", [])),
+        "nfs_shares": state.get("nfs_shares", shares.get("nfs", [])),
+    }
+
+
+def _export_line(share: dict) -> tuple:
+    return (
+        share.get("path", ""),
+        share.get("allowed_hosts") or share.get("clients", ""),
+        share.get("options", ""),
+    )
+
+
 class ReconciliationEngine:
     """
-    Computes and applies the diff between desired and current system state.
+    Computes and applies what separates the running system from the
+    configuration.
 
-    Three modes (spec §6.2):
-    - hybrid           : diff desired vs current, apply minimal changes;
-                         users absent from desired are never deleted (spec §6.5)
-    - declarative      : treat current as empty, apply full desired state;
-                         users and shares missing from desired are deleted
-    - disaster_recovery: restore from config snapshot in fixed order
-                         (hostname → timezone → pools → users → services → shares)
+    Two modes:
+    - declarative: make the system match the configuration exactly — add,
+                   change and remove. What firstboot.sh runs at every boot,
+                   and what the WebUI runs when a configuration is loaded.
+    - additive   : add and change only, never remove; for applying a
+                   partial desired-state file from the command line.
 
-    Constraints (spec §6.5):
-    - Idempotent and safe to re-run
-    - Never assumes OS behaviour — all commands come from the engine profile
-    - Pool modification is not supported (use the storage API instead)
+    Order: hostname → timezone → pools → users → services → SSH → SMB shares
+    → NFS exports → removal of users. Pools come before the shares on them,
+    users before the shares that name them, and users go last so no share
+    still refers to them.
+
+    What is never removed: pools and datasets (pools are only imported),
+    root, system accounts, and administrators — members of the edition's
+    sudo group, who can only be removed from the WebUI, so neither a boot
+    nor a loaded file can leave a system nobody can log in to. A removed
+    account keeps its home directory. A configuration that names no
+    administrator removes nothing at all: it is more likely damaged than
+    meant.
     """
 
     def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager):
@@ -96,216 +133,249 @@ class ReconciliationEngine:
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
-    def compute_diff(
-        self,
-        desired: dict,
-        current: dict,
-        mode: ReconcileMode = ReconcileMode.HYBRID,
-    ) -> List[Change]:
-        """
-        Compare desired vs current state and return the list of Changes needed.
-
-        Both arguments must follow the same schema as config.yaml.
-        In HYBRID mode, users absent from desired are never emitted as "remove".
-        In DECLARATIVE mode (current == {}), only additions are generated.
-        """
-        changes: List[Change] = []
-
-        # System — hostname
-        d_host = desired.get("system", {}).get("hostname")
-        c_host = current.get("system", {}).get("hostname")
-        if d_host and d_host != c_host:
-            changes.append(Change(
-                path="system.hostname",
-                old_value=c_host,
-                new_value=d_host,
-                change_type="modify" if c_host else "add",
-            ))
-
-        # System — timezone
-        d_tz = desired.get("system", {}).get("timezone")
-        c_tz = current.get("system", {}).get("timezone")
-        if d_tz and d_tz != c_tz:
-            changes.append(Change(
-                path="system.timezone",
-                old_value=c_tz,
-                new_value=d_tz,
-                change_type="modify" if c_tz else "add",
-            ))
-
-        # Users — add or modify; in hybrid mode, never delete (spec §6.5)
-        d_users: Dict[str, dict] = {u["username"]: u for u in desired.get("users", [])}
-        c_users: Dict[str, dict] = {u["username"]: u for u in current.get("users", [])}
-        for username, user_cfg in d_users.items():
-            if username not in c_users:
-                changes.append(Change(
-                    path=f"users.{username}",
-                    old_value=None,
-                    new_value=user_cfg,
-                    change_type="add",
-                ))
-            elif user_cfg != c_users[username]:
-                changes.append(Change(
-                    path=f"users.{username}",
-                    old_value=c_users[username],
-                    new_value=user_cfg,
-                    change_type="modify",
-                ))
-        if mode == ReconcileMode.DECLARATIVE:
-            for username in c_users:
-                if username not in d_users:
-                    changes.append(Change(
-                        path=f"users.{username}",
-                        old_value=c_users[username],
-                        new_value=None,
-                        change_type="remove",
-                    ))
-
-        # ZFS pools — import pools not present; modification not supported
-        d_pools: Dict[str, dict] = {p["name"]: p for p in desired.get("storage", {}).get("pools", [])}
-        c_pools: Dict[str, dict] = {p["name"]: p for p in current.get("storage", {}).get("pools", [])}
-        for pool_name, pool_cfg in d_pools.items():
-            if pool_name not in c_pools:
-                changes.append(Change(
-                    path=f"storage.pools.{pool_name}",
-                    old_value=None,
-                    new_value=pool_cfg,
-                    change_type="add",
-                ))
-
-        # SMB shares
-        d_smb: Dict[str, dict] = {s["name"]: s for s in desired.get("smb_shares", [])}
-        c_smb: Dict[str, dict] = {s["name"]: s for s in current.get("smb_shares", [])}
-        for name, share_cfg in d_smb.items():
-            if name not in c_smb:
-                changes.append(Change(
-                    path=f"smb_shares.{name}",
-                    old_value=None,
-                    new_value=share_cfg,
-                    change_type="add",
-                ))
-            elif share_cfg != c_smb[name]:
-                changes.append(Change(
-                    path=f"smb_shares.{name}",
-                    old_value=c_smb[name],
-                    new_value=share_cfg,
-                    change_type="modify",
-                ))
-        for name, share_cfg in c_smb.items():
-            if name not in d_smb:
-                changes.append(Change(
-                    path=f"smb_shares.{name}",
-                    old_value=share_cfg,
-                    new_value=None,
-                    change_type="remove",
-                ))
-
-        # NFS shares
-        d_nfs: Dict[str, dict] = {s["name"]: s for s in desired.get("nfs_shares", [])}
-        c_nfs: Dict[str, dict] = {s["name"]: s for s in current.get("nfs_shares", [])}
-        for name, share_cfg in d_nfs.items():
-            if name not in c_nfs:
-                changes.append(Change(
-                    path=f"nfs_shares.{name}",
-                    old_value=None,
-                    new_value=share_cfg,
-                    change_type="add",
-                ))
-            elif share_cfg != c_nfs[name]:
-                changes.append(Change(
-                    path=f"nfs_shares.{name}",
-                    old_value=c_nfs[name],
-                    new_value=share_cfg,
-                    change_type="modify",
-                ))
-        for name, share_cfg in c_nfs.items():
-            if name not in d_nfs:
-                changes.append(Change(
-                    path=f"nfs_shares.{name}",
-                    old_value=share_cfg,
-                    new_value=None,
-                    change_type="remove",
-                ))
-
-        return changes
-
     def reconcile(
         self,
         desired_path: Optional[str] = None,
-        mode: str = "hybrid",
+        mode: str = "declarative",
+        dry_run: bool = False,
     ) -> List[ActionResult]:
         """
         Bring the system to the desired state.
 
         Args:
-            desired_path: Path to a desired-state YAML file.
-                          If None, uses self.config (the shadow-copy on disk).
-            mode: "hybrid" | "declarative" | "disaster_recovery"
-
-        Returns:
-            List of ActionResult — one entry per engine call attempted.
+            desired_path: A desired-state YAML file; None means config.yaml.
+            mode: "declarative" or "additive" ("disaster_recovery" is
+                  accepted as declarative).
+            dry_run: Plan only; every step comes back as "planned".
         """
-        rec_mode = ReconcileMode(mode)
-
-        if rec_mode == ReconcileMode.DISASTER_RECOVERY:
-            state = self.config.to_dict()
-            return self._apply_disaster_recovery(state)
-
-        desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
-        current = {} if rec_mode == ReconcileMode.DECLARATIVE else self.config.to_dict()
-
-        changes = self.compute_diff(desired, current, mode=rec_mode)
+        changes = self.plan(desired_path, mode)
+        if dry_run:
+            return [
+                ActionResult(action=c.path, params={"change": c.change_type}, target_state="planned")
+                for c in changes
+            ]
         return self._apply_changes(changes)
 
+    def plan(self, desired_path: Optional[str] = None, mode: str = "declarative") -> List[Change]:
+        desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
+        return self.compute_diff(desired, self.observe(), mode=parse_mode(mode))
+
     # ------------------------------------------------------------------
-    # Internal — disaster recovery
+    # Observing the running system
     # ------------------------------------------------------------------
 
-    def _apply_disaster_recovery(self, state: dict) -> List[ActionResult]:
+    def observe(self) -> dict:
         """
-        Full restore from config snapshot. Fixed order (spec §6.4):
-        1. Hostname  2. Timezone  3. Pools  4. Users  5. Services  6. Shares
+        The running system, in config.yaml's shape. A part that cannot be
+        read is None rather than empty: nothing is removed on the strength of
+        a list that could not be taken.
         """
-        results: List[ActionResult] = []
+        return {
+            "system": {
+                "hostname": self._read("system", "hostname_get"),
+                "timezone": self._read("system", "timezone_get"),
+            },
+            "storage": {"pools": self._observe_pools()},
+            "users": self._observe_users(),
+            "smb_shares": self._observe_smb_shares(),
+            "nfs_shares": self._observe_nfs_exports(),
+        }
 
-        hostname = state.get("system", {}).get("hostname")
-        if hostname:
-            results.append(self._do_hostname(hostname))
+    def _read(self, category: str, action: str, **kwargs) -> Optional[str]:
+        try:
+            stdout, _ = self.engine.execute(category, action, **kwargs)
+        except (CommandExecutionError, CommandTranslationError):
+            return None
+        return stdout.strip()
 
-        timezone = state.get("system", {}).get("timezone")
-        if timezone:
-            results.append(self._do_timezone(timezone))
+    def _observe_pools(self) -> Optional[List[dict]]:
+        out = self._read("zfs", "pool_list")
+        if out is None:
+            return None
+        return [{"name": line.split()[0]} for line in out.splitlines() if line.split()]
 
-        for pool in state.get("storage", {}).get("pools", []):
-            results.append(self._do_pool_import(pool))
+    def _observe_users(self) -> Optional[List[dict]]:
+        out = self._read("users", "list")
+        if out is None:
+            return None
+        users = []
+        for line in out.splitlines():
+            name = line.split(":", 1)[0].strip()
+            if not name or name == "root":
+                continue
+            groups = self._read("users", "list_groups", username=name)
+            users.append({"username": name, "groups": (groups or "").split()})
+        return users
 
-        for user in state.get("users", []):
-            results.append(self._do_user_create(user))
+    def _observe_smb_shares(self) -> Optional[List[dict]]:
+        out = self._read("samba", "list_shares")
+        if out is None:
+            return None
+        return [{"name": line.strip()} for line in out.splitlines() if line.strip()]
 
-        for feature in state.get("installed_features", []):
+    def _observe_nfs_exports(self) -> Optional[List[dict]]:
+        """
+        /etc/exports has no share names: an export is a line, identified by
+        its path. Reading a file is not a system command, so it is read here.
+        """
+        try:
+            path = self.engine.get_profile_value("nfs", "config_file")
+            with open(path) as f:
+                lines = f.read().splitlines()
+        except (CommandTranslationError, OSError):
+            return None
+        exports = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) == 2 and "(" in fields[1]:
+                clients, _, options = fields[1].partition("(")
+                exports.append({"path": fields[0], "allowed_hosts": clients,
+                                "options": options.rstrip(")")})
+            else:
+                # FreeBSD's `path -opts -network ...`, or a line written by
+                # hand: known by its path only.
+                exports.append({"path": fields[0], "opaque": True})
+        return exports
+
+    # ------------------------------------------------------------------
+    # Planning
+    # ------------------------------------------------------------------
+
+    def compute_diff(
+        self,
+        desired: dict,
+        current: dict,
+        mode: ReconcileMode = ReconcileMode.DECLARATIVE,
+    ) -> List[Change]:
+        """
+        The ordered list of Changes that turns `current` (from observe())
+        into `desired` (config.yaml's shape). ADDITIVE drops every removal.
+        """
+        desired = _normalize(desired)
+        changes: List[Change] = []
+
+        for key in ("hostname", "timezone"):
+            want = desired.get("system", {}).get(key)
+            have = current.get("system", {}).get(key)
+            if want and want != have:
+                changes.append(Change(f"system.{key}", have, want, "modify" if have else "add"))
+
+        imported = {p["name"] for p in current.get("storage", {}).get("pools") or []}
+        for pool in desired.get("storage", {}).get("pools", []):
+            if pool.get("name") and pool["name"] not in imported:
+                changes.append(Change(f"storage.pools.{pool['name']}", None, pool, "add"))
+
+        observed_users = current.get("users")
+        existing = {u["username"]: u for u in observed_users or []}
+        wanted_users = {u["username"]: u for u in desired.get("users", []) if u.get("username")}
+        managed = self._managed_groups(desired)
+        for name, user in wanted_users.items():
+            if observed_users is not None and name not in existing:
+                changes.append(Change(f"users.{name}", None, user, "add"))
+            elif observed_users is None:
+                changes.append(Change(f"users.{name}", None, user, "ensure"))
+            else:
+                have = set(existing[name].get("groups", [])) & managed
+                want = set(user.get("groups", [])) & managed
+                if have != want:
+                    changes.append(Change(
+                        f"users.{name}",
+                        {"username": name, "groups": sorted(have)},
+                        user,
+                        "modify",
+                    ))
+
+        for feature in desired.get("installed_features", []):
             if feature.get("enabled"):
-                results.extend(self._do_service_enable(feature["id"]))
+                changes.append(Change(f"features.{feature['id']}", None, feature, "ensure"))
 
-        ssh_enabled = state.get("system", {}).get("ssh_enabled")
-        if ssh_enabled is not None:
-            results.extend(self._do_ssh(bool(ssh_enabled)))
+        ssh = desired.get("system", {}).get("ssh_enabled")
+        if ssh is not None:
+            changes.append(Change("system.ssh", None, bool(ssh), "ensure"))
 
-        for share in state.get("smb_shares", []):
-            results.append(self._do_smb_share_create(share))
+        removals_allowed = mode == ReconcileMode.DECLARATIVE and self._names_an_admin(desired)
+        if mode == ReconcileMode.DECLARATIVE and not removals_allowed:
+            logger.warning("The configuration names no administrator: nothing will be removed")
 
-        for share in state.get("nfs_shares", []):
-            results.append(self._do_nfs_share_create(share))
+        wanted_smb = {s["name"]: s for s in desired.get("smb_shares", []) if s.get("name")}
+        if removals_allowed:
+            for share in current.get("smb_shares") or []:
+                if share["name"] not in wanted_smb:
+                    changes.append(Change(f"smb_shares.{share['name']}", share, None, "remove"))
+        for name, share in wanted_smb.items():
+            changes.append(Change(f"smb_shares.{name}", None, share, "ensure"))
 
-        return results
+        observed_exports = current.get("nfs_shares")
+        have_lines = {_export_line(e) for e in observed_exports or [] if not e.get("opaque")}
+        opaque_paths = {e["path"] for e in observed_exports or [] if e.get("opaque")}
+        have_paths = {line[0] for line in have_lines} | opaque_paths
+        want = {_export_line(s): s for s in desired.get("nfs_shares", []) if s.get("path")}
+        want_paths = {line[0] for line in want}
+        if removals_allowed:
+            for export in observed_exports or []:
+                stale = (export["path"] not in want_paths if export.get("opaque")
+                         else _export_line(export) not in want)
+                if stale:
+                    changes.append(Change(f"nfs_shares.{export['path']}", export, None, "remove"))
+        for line, share in want.items():
+            if line in have_lines or line[0] in opaque_paths:
+                continue
+            if line[0] in have_paths and not removals_allowed:
+                logger.warning("NFS export %s differs from the configuration; left alone", line[0])
+                continue
+            changes.append(Change(f"nfs_shares.{share.get('name', line[0])}", None, share, "add"))
+
+        if removals_allowed and observed_users is not None:
+            sudo_group = self._profile_value("users", "sudo_group")
+            for name, user in existing.items():
+                if name in wanted_users:
+                    continue
+                if sudo_group and sudo_group in user.get("groups", []):
+                    logger.info("Keeping administrator %s: administrators are removed from the WebUI", name)
+                    continue
+                changes.append(Change(f"users.{name}", user, None, "remove"))
+
+        if mode == ReconcileMode.ADDITIVE:
+            changes = [c for c in changes if c.change_type != "remove"]
+        return changes
+
+    def _profile_value(self, category: str, key: str) -> str:
+        try:
+            return self.engine.get_profile_value(category, key) or ""
+        except CommandTranslationError:
+            return ""
+
+    def _managed_groups(self, desired: dict) -> Set[str]:
+        """
+        The groups FreedomNAS assigns. Membership of any other group — a
+        user's own primary group, `users`, anything an administrator set up
+        by hand — is none of the reconciler's business.
+        """
+        groups = {g for u in desired.get("users", []) for g in u.get("groups", [])}
+        for key in ("sudo_group", "share_group"):
+            value = self._profile_value("users", key)
+            if value:
+                groups.add(value)
+        return groups
+
+    def _names_an_admin(self, desired: dict) -> bool:
+        sudo_group = self._profile_value("users", "sudo_group")
+        return any(
+            u.get("admin") or (sudo_group and sudo_group in u.get("groups", []))
+            for u in desired.get("users", [])
+        )
 
     # ------------------------------------------------------------------
-    # Internal — change application
+    # Applying
     # ------------------------------------------------------------------
 
     def _apply_changes(self, changes: List[Change]) -> List[ActionResult]:
         results: List[ActionResult] = []
         for change in changes:
-            path = change.path
+            path, kind = change.path, change.change_type
 
             if path == "system.hostname":
                 results.append(self._do_hostname(change.new_value))
@@ -313,32 +383,34 @@ class ReconciliationEngine:
             elif path == "system.timezone":
                 results.append(self._do_timezone(change.new_value))
 
-            elif path.startswith("users."):
-                if change.change_type == "add":
-                    results.append(self._do_user_create(change.new_value))
-                elif change.change_type == "modify":
-                    results.extend(self._do_user_modify(change.new_value, change.old_value))
-                elif change.change_type == "remove":
-                    username = path.split(".", 1)[1]
-                    results.append(self._do_user_delete(username))
+            elif path == "system.ssh":
+                results.extend(self._do_ssh(change.new_value))
 
             elif path.startswith("storage.pools."):
-                if change.change_type == "add":
-                    results.append(self._do_pool_import(change.new_value))
+                results.append(self._do_pool_import(change.new_value))
+
+            elif path.startswith("users."):
+                if kind in ("add", "ensure"):
+                    results.append(self._do_user_create(change.new_value))
+                elif kind == "modify":
+                    results.extend(self._do_user_modify(change.new_value, change.old_value))
+                elif kind == "remove":
+                    results.append(self._do_user_delete(path.split(".", 1)[1]))
+
+            elif path.startswith("features."):
+                results.extend(self._do_service_enable(change.new_value["id"]))
 
             elif path.startswith("smb_shares."):
-                if change.change_type in ("add", "modify"):
+                if kind == "remove":
+                    results.append(self._do_smb_share_delete(path.split(".", 1)[1]))
+                else:
                     results.append(self._do_smb_share_create(change.new_value))
-                elif change.change_type == "remove":
-                    share_name = path.split(".", 1)[1]
-                    results.append(self._do_smb_share_delete(share_name))
 
             elif path.startswith("nfs_shares."):
-                if change.change_type in ("add", "modify"):
+                if kind == "remove":
+                    results.append(self._do_nfs_export_remove(change.old_value["path"]))
+                else:
                     results.append(self._do_nfs_share_create(change.new_value))
-                elif change.change_type == "remove":
-                    share_name = path.split(".", 1)[1]
-                    results.append(self._do_nfs_share_delete(share_name))
 
         return results
 
@@ -370,22 +442,9 @@ class ReconciliationEngine:
     # Internal — atomic engine calls: ZFS
     # ------------------------------------------------------------------
 
-    def _pool_is_imported(self, pool_name: str) -> bool:
-        """A pool that is already imported is not an error to reconcile."""
-        try:
-            stdout, _ = self.engine.execute("zfs", "pool_list", check=False)
-        except (CommandExecutionError, CommandTranslationError):
-            return False
-        return any(line.split()[:1] == [pool_name] for line in stdout.splitlines() if line.split())
-
     def _do_pool_import(self, pool: dict) -> ActionResult:
         pool_name = pool.get("name", "")
         params = {"pool_name": pool_name}
-        if self._pool_is_imported(pool_name):
-            return ActionResult(
-                action="zfs.pool_import", params=params,
-                target_state="skipped", error="already imported",
-            )
         try:
             self.engine.execute("zfs", "pool_import", pool_name=pool_name)
             logger.info("Imported ZFS pool: %s", pool_name)
@@ -399,7 +458,6 @@ class ReconciliationEngine:
     # ------------------------------------------------------------------
 
     def _user_exists(self, username: str) -> bool:
-        """The root pool's config describes users that a reinstall may already have."""
         try:
             stdout, _ = self.engine.execute(
                 "users", "get_user_info", username=username, check=False
@@ -472,21 +530,35 @@ class ReconciliationEngine:
         return results
 
     def _do_user_delete(self, username: str) -> ActionResult:
-        """Delete a user. Called only in declarative mode."""
+        """
+        Remove an account the configuration no longer names. Its home
+        directory stays: a stale configuration must never cost anyone their
+        files. It leaves Samba's database first, as it does from the WebUI.
+        """
         params = {"username": username}
         try:
-            self.engine.execute("users", "delete", username=username)
-            logger.info("Deleted user: %s", username)
-            return ActionResult(action="users.delete", params=params, target_state="applied")
+            self.engine.execute("samba", "check_installed")
+            self.engine.execute("samba", "delete_user", username=username, check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            pass
+        try:
+            self.engine.execute("users", "delete_keep_home", username=username)
+            logger.info("Removed user %s, home directory kept", username)
+            return ActionResult(action="users.delete_keep_home", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
-            logger.error("Failed to delete user %s: %s", username, exc)
-            return ActionResult(action="users.delete", params=params, target_state="failed", error=str(exc))
+            logger.error("Failed to remove user %s: %s", username, exc)
+            return ActionResult(action="users.delete_keep_home", params=params, target_state="failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: SMB shares
     # ------------------------------------------------------------------
 
     def _do_smb_share_create(self, share: dict) -> ActionResult:
+        """
+        `net usershare add` replaces a share of the same name, so every
+        recorded share is written again: its path, comment and ACL end up
+        exactly as recorded, whatever changed them in between.
+        """
         name = share.get("name", "")
         path = share.get("path", "")
         comment = share.get("comment", "")
@@ -500,7 +572,7 @@ class ReconciliationEngine:
                 comment=comment,
                 acl=acl,
             )
-            logger.info("Created SMB share: %s → %s", name, path)
+            logger.info("SMB share %s → %s", name, path)
             return ActionResult(action="samba.create_share", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to create SMB share %s: %s", name, exc)
@@ -529,51 +601,46 @@ class ReconciliationEngine:
             return ActionResult(action="samba.delete_share", params=params, target_state="failed", error=str(exc))
 
     # ------------------------------------------------------------------
-    # Internal — atomic engine calls: NFS shares
+    # Internal — atomic engine calls: NFS exports
     # ------------------------------------------------------------------
 
     def _do_nfs_share_create(self, share: dict) -> ActionResult:
+        """
+        The hosts are what the WebUI records as `allowed_hosts`. A share with
+        none is not exported at all: exporting it to `*` would open it to
+        every host that can reach the NAS.
+        """
         name = share.get("name", "")
-        path = share.get("path", "")
-        clients = share.get("clients", "*")
-        options = share.get("options", "ro,sync,no_subtree_check")
+        path, clients, options = _export_line(share)
         params = {"name": name, "path": path, "clients": clients}
+        if not clients:
+            return ActionResult(
+                action="nfs.export_add", params=params, target_state="skipped",
+                error="no allowed_hosts recorded",
+            )
         try:
             self.engine.execute(
                 "nfs", "export_add",
                 path=path,
                 clients=clients,
-                options=options,
+                options=options or "rw,sync,no_subtree_check",
             )
             self.engine.execute("nfs", "exportfs_reload")
-            logger.info("Created NFS share: %s → %s", name, path)
+            logger.info("NFS export %s → %s", path, clients)
             return ActionResult(action="nfs.export_add", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to create NFS share %s: %s", name, exc)
             return ActionResult(action="nfs.export_add", params=params, target_state="failed", error=str(exc))
 
-    def _do_nfs_share_delete(self, share_name: str) -> ActionResult:
-        params = {"name": share_name}
-
-        # /etc/exports has no notion of a share name: a line is identified by
-        # its path, so look it up the way the WebUI's delete route does.
-        share = next(
-            (s for s in self.config.get_nfs_shares() if s.get("name") == share_name),
-            None,
-        )
-        if share is None or not share.get("path"):
-            return ActionResult(
-                action="nfs.export_remove", params=params, target_state="skipped",
-                error=f"No path recorded for NFS share '{share_name}'",
-            )
-
+    def _do_nfs_export_remove(self, path: str) -> ActionResult:
+        params = {"path": path}
         try:
-            self.engine.execute("nfs", "export_remove", path=share["path"])
+            self.engine.execute("nfs", "export_remove", path=path)
             self.engine.execute("nfs", "exportfs_reload")
-            logger.info("Deleted NFS share: %s", share_name)
+            logger.info("Removed NFS export: %s", path)
             return ActionResult(action="nfs.export_remove", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
-            logger.error("Failed to delete NFS share %s: %s", share_name, exc)
+            logger.error("Failed to remove NFS export %s: %s", path, exc)
             return ActionResult(action="nfs.export_remove", params=params, target_state="failed", error=str(exc))
 
     # ------------------------------------------------------------------

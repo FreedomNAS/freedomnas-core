@@ -273,7 +273,13 @@ def cmd_reconcile(args) -> int:
         print(f"ERROR: could not initialise reconciler: {exc}", file=sys.stderr)
         return 1
 
-    results = reconciler.reconcile(desired_path=args.desired, mode=args.mode)
+    results = reconciler.reconcile(desired_path=args.desired, mode=args.mode, dry_run=args.dry_run)
+
+    if args.dry_run:
+        for result in results:
+            print(f"  PLAN  {result.params['change']:<6} {result.action}")
+        print(f"\n{len(results)} planned step(s), nothing applied.")
+        return 0
 
     failed = 0
     for result in results:
@@ -365,9 +371,15 @@ def main() -> int:
     reconcile_parser = sub.add_parser("reconcile", help="Apply configuration via the ReconciliationEngine")
     reconcile_parser.add_argument(
         "--mode",
-        choices=["hybrid", "declarative", "disaster_recovery"],
-        default="disaster_recovery",
-        help="Reconciliation mode (default: disaster_recovery, for first-boot use)",
+        choices=["declarative", "additive", "disaster_recovery"],
+        default="declarative",
+        help="declarative (default): make the system match exactly, removals included; "
+             "additive: add and change only. disaster_recovery is the old name of declarative",
+    )
+    reconcile_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the steps without applying any",
     )
     reconcile_parser.add_argument(
         "--desired",
