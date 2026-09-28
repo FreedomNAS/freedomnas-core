@@ -172,7 +172,7 @@ class ReconciliationEngine:
         """
         return {
             "system": {
-                "hostname": self._read("system", "hostname_get"),
+                "hostname": self._read("network", "hostname_get"),
                 "timezone": self._read("system", "timezone_get"),
             },
             "storage": {"pools": self._observe_pools()},

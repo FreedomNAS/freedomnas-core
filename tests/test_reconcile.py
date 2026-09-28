@@ -44,7 +44,7 @@ class FakeEngine:
         key = (category, action)
         if key == ("zfs", "pool_list"):
             return "\n".join(f"{p}\t1\t2" for p in self.imported_pools), ""
-        if key == ("system", "hostname_get"):
+        if key == ("network", "hostname_get"):
             return self.hostname + "\n", ""
         if key == ("system", "timezone_get"):
             return self.timezone + "\n", ""
@@ -66,7 +66,7 @@ class FakeEngine:
             raise CommandTranslationError(f"no such value: {category}.{key}")
 
     def actions(self):
-        observing = {("zfs", "pool_list"), ("system", "hostname_get"), ("system", "timezone_get"),
+        observing = {("zfs", "pool_list"), ("network", "hostname_get"), ("system", "timezone_get"),
                      ("users", "list"), ("users", "list_groups"), ("samba", "list_shares")}
         return [(c, a) for c, a, _ in self.calls if (c, a) not in observing]
 
