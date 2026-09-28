@@ -264,6 +264,20 @@ def test_disaster_recovery_applies_in_fixed_order():
     ]
 
 
+@pytest.mark.parametrize("share, acl", [
+    ({"name": "foto", "path": "/tank/foto", "acl": "Everyone:R,sarah:F,mario:R"},
+     "Everyone:R,sarah:F,mario:R"),
+    ({"name": "foto", "path": "/tank/foto", "valid_users": ["sarah"]}, "Everyone:R,sarah:F"),
+    ({"name": "foto", "path": "/tank/foto"}, "Everyone:R"),
+])
+def test_a_restored_share_never_gets_more_access_than_it_had(share, acl):
+    engine = FakeEngine()
+    r = reconciler(engine, FakeConfig(state={"smb_shares": [share]}))
+    r.reconcile(mode="disaster_recovery")
+    [created] = [kw for cat, act, kw in engine.calls if (cat, act) == ("samba", "create_share")]
+    assert created["acl"] == acl
+
+
 def test_disaster_recovery_skips_disabled_features():
     state = {"installed_features": [{"id": "nfs", "enabled": False}]}
     r = reconciler(config=FakeConfig(state=state))

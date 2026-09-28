@@ -490,7 +490,7 @@ class ReconciliationEngine:
         name = share.get("name", "")
         path = share.get("path", "")
         comment = share.get("comment", "")
-        acl = share.get("acl", "Everyone:F")
+        acl = share.get("acl") or self._default_smb_acl(share)
         params = {"share_name": name, "path": path}
         try:
             self.engine.execute(
@@ -505,6 +505,16 @@ class ReconciliationEngine:
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to create SMB share %s: %s", name, exc)
             return ActionResult(action="samba.create_share", params=params, target_state="failed", error=str(exc))
+
+    @staticmethod
+    def _default_smb_acl(share: dict) -> str:
+        """
+        Shares recorded before the ACL was stored carry only their users. The
+        WebUI gave such a share read access for everyone and full control to
+        whoever created it; rebuild that, never more than it.
+        """
+        owners = [u for u in share.get("valid_users", []) if u]
+        return ",".join(["Everyone:R"] + [f"{u}:F" for u in owners])
 
     def _do_smb_share_delete(self, share_name: str) -> ActionResult:
         params = {"share_name": share_name}
