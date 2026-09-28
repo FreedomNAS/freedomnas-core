@@ -5,7 +5,7 @@
   "type": "core",
   "description": "Verifies configured users exist on the OS.",
   "entry_point": "module:UsersModule",
-  "supported_os": ["debian", "freebsd", "arch"],
+  "supported_os": [],
   "depends_on": [],
   "webui": null
 }

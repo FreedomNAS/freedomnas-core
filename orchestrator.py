@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine
@@ -105,6 +105,14 @@ class FreedomNASModule(ABC):
         Called by the heartbeat thread every HEARTBEAT_INTERVAL seconds.
         Must not raise — catch all exceptions internally and return False.
         """
+
+    def health(self) -> Tuple[bool, str]:
+        """
+        Whether the module is operating normally, and a line saying why, for
+        the dashboard. Modules that can say more than yes or no override it.
+        """
+        healthy = self.health_check()
+        return healthy, "" if healthy else "health check failed"
 
 
 # ---------------------------------------------------------------------------

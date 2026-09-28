@@ -9,7 +9,7 @@ breaker will disable the module after MAX_FAILURES consecutive failures.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
@@ -45,28 +45,33 @@ class StorageModule(FreedomNASModule):
         self._known_pools.clear()
         logger.info("StorageModule stopped")
 
-    def health_check(self) -> bool:
+    def health(self) -> Tuple[bool, str]:
         """
-        Run zpool list and check that no tracked pool is in an unhealthy state.
-        Returns True only when all known pools report ONLINE.
+        Every imported pool, not only the recorded ones: a degraded pool is
+        worth knowing about whoever created it. `zpool list -Hp -o
+        name,size,alloc,free,capacity,health` names its columns, so health
+        is the sixth and last one.
         """
         try:
             stdout, _ = self._engine.execute("zfs", "pool_list")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.warning("StorageModule health_check: pool_list failed: %s", exc)
-            return False
+            return False, f"cannot list pools: {exc}"
 
-        # `zpool list -Hp -o name,size,alloc,free,capacity,health`: the
-        # profile names its columns, so health is the sixth and last one.
-        # Left to zpool's default order it moved between OpenZFS releases.
+        pools, unhealthy = [], []
         for line in stdout.strip().splitlines():
             parts = line.split("\t")
             if len(parts) < 6:
                 continue
-            pool_name = parts[0]
-            health = parts[5].upper()
-            if pool_name in self._known_pools and health in _UNHEALTHY_STATES:
-                logger.error("Pool %s is in state: %s", pool_name, health)
-                return False
+            pools.append(parts[0])
+            if parts[5].upper() in _UNHEALTHY_STATES:
+                unhealthy.append(f"{parts[0]} is {parts[5].upper()}")
+        if unhealthy:
+            logger.error("Unhealthy pools: %s", ", ".join(unhealthy))
+            return False, ", ".join(unhealthy)
+        if not pools:
+            return True, "no pools"
+        return True, f"{len(pools)} pool(s) online"
 
-        return True
+    def health_check(self) -> bool:
+        return self.health()[0]

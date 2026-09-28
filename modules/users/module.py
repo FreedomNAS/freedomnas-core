@@ -8,7 +8,7 @@ False if any user is missing (non-zero exit code from the engine).
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
@@ -48,22 +48,26 @@ class UsersModule(FreedomNASModule):
         self._expected_users.clear()
         logger.info("UsersModule stopped")
 
-    def health_check(self) -> bool:
+    def health(self) -> Tuple[bool, str]:
         """
-        Verify each configured user still exists on the OS.
-        A missing user indicates config/OS drift and is treated as unhealthy.
+        Every configured account still exists on the OS; a missing one is
+        drift between the configuration and the system.
         """
+        missing = []
         for username in self._expected_users:
             try:
-                self._engine.execute("users", "get_user_info", username=username)
-            except CommandExecutionError as exc:
-                logger.warning(
-                    "UsersModule: user '%s' not found on OS: %s", username, exc
-                )
-                return False
+                out, _ = self._engine.execute("users", "get_user_info", username=username, check=False)
             except CommandTranslationError as exc:
-                # Profile doesn't support get_user_info — skip this check gracefully
                 logger.debug("UsersModule: get_user_info not available: %s", exc)
-                return True
+                return True, "accounts cannot be checked on this edition"
+            except CommandExecutionError:
+                out = ""
+            if not out.strip():
+                logger.warning("UsersModule: user '%s' not found on OS", username)
+                missing.append(username)
+        if missing:
+            return False, ", ".join(missing) + " missing from the system"
+        return True, f"{len(self._expected_users)} account(s) present"
 
-        return True
+    def health_check(self) -> bool:
+        return self.health()[0]

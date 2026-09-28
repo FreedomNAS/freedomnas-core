@@ -111,14 +111,12 @@ class ModuleLoader:
         except AttributeError:
             raise ModuleLoaderException(f"{file_path} has no class '{class_name}'")
 
-    def load_all(self, orchestrator: Orchestrator) -> List[str]:
+    def instances(self) -> List[tuple]:
         """
-        Discover every module, skip those unsupported on the current OS,
-        instantiate and register the rest with the orchestrator.
-
-        Returns the list of module ids that were registered.
+        Discover every module, skip those unsupported on the current OS, and
+        instantiate the rest. Returns (manifest, instance) pairs, unstarted.
         """
-        registered = []
+        loaded = []
         for manifest in self.discover():
             module_id = manifest.get("id", manifest["_dir"].name)
             supported_os = manifest.get("supported_os", [])
@@ -136,6 +134,17 @@ class ModuleLoader:
 
             module_class = self._load_class(manifest["_dir"], entry_point)
             instance: FreedomNASModule = module_class(self._engine, self._config)
+            loaded.append((manifest, instance))
+        return loaded
+
+    def load_all(self, orchestrator: Orchestrator) -> List[str]:
+        """
+        Instantiate every module this OS supports and register it with the
+        orchestrator. Returns the list of module ids that were registered.
+        """
+        registered = []
+        for manifest, instance in self.instances():
+            module_id = manifest.get("id", manifest["_dir"].name)
             orchestrator.register(instance)
             registered.append(module_id)
             logger.info("Module '%s' loaded and registered", module_id)

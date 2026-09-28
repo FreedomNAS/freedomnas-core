@@ -9,7 +9,7 @@ never hardcoded, satisfying the Golden Rule (spec §3.1).
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
@@ -62,14 +62,12 @@ class SharesModule(FreedomNASModule):
         self._active_services.clear()
         logger.info("SharesModule stopped")
 
-    def health_check(self) -> bool:
-        """
-        Return True if every tracked service reports as active.
-        Uses the `services.status` profile action.
-        """
+    def health(self) -> Tuple[bool, str]:
+        """Every service of an enabled share feature answers `services.status`."""
         if not self._active_services:
-            return True  # nothing to check
+            return True, "no share services enabled"
 
+        stopped = []
         for service_name in self._active_services:
             try:
                 self._engine.execute("services", "status", service_name=service_name)
@@ -77,10 +75,14 @@ class SharesModule(FreedomNASModule):
                 logger.warning(
                     "SharesModule: service %s is not running: %s", service_name, exc
                 )
-                return False
+                stopped.append(service_name)
             except CommandTranslationError as exc:
                 logger.warning(
                     "SharesModule: no status action for service %s: %s", service_name, exc
                 )
+        if stopped:
+            return False, ", ".join(stopped) + " not running"
+        return True, ", ".join(self._active_services) + " running"
 
-        return True
+    def health_check(self) -> bool:
+        return self.health()[0]

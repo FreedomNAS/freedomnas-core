@@ -7,7 +7,9 @@ Persistent interface mappings are read from the config at start time.
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine, CommandExecutionError, CommandTranslationError
@@ -41,22 +43,37 @@ class NetworkModule(FreedomNASModule):
     def stop(self) -> None:
         logger.info("NetworkModule stopped")
 
-    def health_check(self) -> bool:
+    def health(self) -> Tuple[bool, str]:
         """
-        Return True if at least one non-loopback interface reports as up.
-        Uses list_interfaces action, which lists active Ethernet/Wi-Fi interfaces.
+        At least one interface other than loopback is up. Linux profiles
+        list interfaces as `ip -j addr show` JSON, with their state; FreeBSD's
+        `ifconfig -l -ether` gives bare names, and a name there means an
+        Ethernet interface exists.
         """
         try:
-            output = self._engine.execute("network", "list_interfaces")
+            stdout, _ = self._engine.execute("network", "list_interfaces")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.warning("NetworkModule health_check: list_interfaces failed: %s", exc)
-            return False
+            return False, f"cannot list interfaces: {exc}"
 
-        interfaces = output.strip().split() if output else []
-        # Filter loopback
-        active = [i for i in interfaces if not i.startswith("lo")]
-        if not active:
+        try:
+            listed = json.loads(stdout)
+        except ValueError:
+            listed = None
+        if isinstance(listed, list):
+            up = [
+                i.get("ifname", "") for i in listed
+                if isinstance(i, dict)
+                and not i.get("ifname", "lo").startswith("lo")
+                and (i.get("operstate") == "UP" or "UP" in i.get("flags", []) and "LOWER_UP" in i.get("flags", []))
+            ]
+        else:
+            up = [name for name in stdout.split() if not name.startswith("lo")]
+
+        if not up:
             logger.warning("NetworkModule: no active non-loopback interfaces found")
-            return False
+            return False, "no interface is up"
+        return True, ", ".join(up) + " up"
 
-        return True
+    def health_check(self) -> bool:
+        return self.health()[0]

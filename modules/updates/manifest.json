@@ -5,7 +5,7 @@
   "type": "core",
   "description": "Update configuration consistency (topgrade).",
   "entry_point": "module:UpdatesModule",
-  "supported_os": ["debian", "freebsd", "arch"],
+  "supported_os": [],
   "depends_on": [],
   "webui": null
 }

@@ -5,7 +5,7 @@
   "type": "core",
   "description": "Network interface availability monitoring.",
   "entry_point": "module:NetworkModule",
-  "supported_os": ["debian", "freebsd", "arch"],
+  "supported_os": [],
   "depends_on": [],
   "webui": null
 }

@@ -35,16 +35,24 @@ def _module(stdout, tracked):
     return mod
 
 
-def test_every_tracked_pool_online_passes():
-    assert _module(POOLS, ["tank"]).health_check() is True
+ONLINE = "tank\t3958241161216\t1979120580608\t1979120580608\t50\tONLINE\n"
 
 
-def test_a_degraded_pool_fails_the_check():
-    assert _module(POOLS, ["tank", "backup"]).health_check() is False
+def test_every_pool_online_passes():
+    assert _module(ONLINE, ["tank"]).health() == (True, "1 pool(s) online")
 
 
-def test_a_pool_that_is_not_tracked_is_not_our_problem():
-    assert _module(POOLS, ["tank"]).health_check() is True
+def test_a_degraded_pool_fails_the_check_and_says_which():
+    assert _module(POOLS, ["tank", "backup"]).health() == (False, "backup is DEGRADED")
+
+
+def test_an_unrecorded_pool_counts_too():
+    """A system set up from an image does not record its root pool."""
+    assert _module(POOLS, ["tank"]).health_check() is False
+
+
+def test_no_pools_is_not_a_failure():
+    assert _module("", []).health() == (True, "no pools")
 
 
 def test_short_lines_are_skipped():
