@@ -9,15 +9,18 @@ PART_SIZE = 9 * GIB
 
 class FakeEngine:
     def __init__(self, disk_size, leaves="\t/dev/vda2\t9G\t1G\t8G\t-\t-\t0%\t10%\t-\tONLINE\t-",
-                 root="rpool/ROOT/debian", failing=()):
+                 root="rpool/ROOT/debian", failing=(), offsets=(1024 * 1024, PART_START)):
         self.disk_size = disk_size
+        self.offsets = offsets
         self.leaves = leaves
         self.root = root
         self.failing = set(failing)
         self.calls = []
+        self.kwargs = {}
 
     def execute(self, category, action, timeout=30, **kwargs):
         self.calls.append(action)
+        self.kwargs[action] = kwargs
         if action in self.failing:
             raise CommandExecutionError(f"{action} failed")
         return {
@@ -25,6 +28,7 @@ class FakeEngine:
             "pool_leaf_devices": "rpool\t9G\t1G\t8G\t-\t-\t0%\t10%\t1.00x\tONLINE\t-\n" + self.leaves,
             "partition_of": f"/dev/vda 2 {PART_START} {PART_SIZE}",
             "disk_size": str(self.disk_size),
+            "partition_offsets": "\n".join(str(o) for o in self.offsets),
         }.get(action, ""), ""
 
 
@@ -67,3 +71,29 @@ def test_a_failing_resize_is_reported_not_raised():
 
     assert not result["grown"] and "partition_grow failed" in result["reason"]
     assert "pool_expand" not in engine.calls
+
+
+def test_a_partition_right_after_it_is_left_alone():
+    after = PART_START + PART_SIZE
+    engine = FakeEngine(disk_size=after + 700 * GIB, offsets=(1024 * 1024, PART_START, after))
+    result = grow_root_pool(engine)
+
+    assert not result["grown"] and "another partition follows" in result["reason"]
+    assert "partition_grow" not in engine.calls
+
+
+def test_free_space_before_the_next_partition_is_taken():
+    engine = FakeEngine(disk_size=PART_START + PART_SIZE + 200 * GIB,
+                        offsets=(1024 * 1024, PART_START, PART_START + PART_SIZE + 100 * GIB))
+    result = grow_root_pool(engine)
+
+    assert result["grown"]
+
+
+def test_the_pool_is_expanded_through_its_own_device_name():
+    by_id = "/dev/disk/by-id/nvme-disk-part2"
+    engine = FakeEngine(disk_size=PART_START + PART_SIZE + 100 * GIB,
+                        leaves=f"\t{by_id}\t9G\t1G\t8G\t-\t-\t0%\t10%\t-\tONLINE\t-")
+    result = grow_root_pool(engine)
+
+    assert result["grown"] and engine.kwargs["pool_expand"]["device"] == by_id

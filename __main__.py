@@ -388,7 +388,7 @@ def main() -> int:
     )
     sub.add_parser(
         "grow-root-pool",
-        help="Extend the root pool's partition and the pool to the end of the disk",
+        help="Extend the root pool's partition and the pool into the free space after it",
     )
     snapshot_parser = sub.add_parser(
         "snapshot-run",

@@ -37,7 +37,8 @@ def _single_device(listing: str) -> Optional[str]:
 
 def grow_root_pool(engine) -> Dict[str, object]:
     """
-    Extend the root pool's partition to the end of its disk, then the pool.
+    Extend the root pool's partition into the free space that follows it,
+    then the pool.
 
     Returns {"pool", "device", "grown": bool, "reason": str}. Never raises.
     """
@@ -60,9 +61,13 @@ def grow_root_pool(engine) -> Dict[str, object]:
         info, _ = engine.execute("zfs", "partition_of", device=device)
         disk, part_num, start, size = info.split()
         disk_size, _ = engine.execute("zfs", "disk_size", disk=disk)
-        free = int(disk_size) - (int(start) + int(size))
+        offsets, _ = engine.execute("zfs", "partition_offsets", disk=disk)
+        end = int(start) + int(size)
+        following = [int(o) for o in offsets.split() if int(o) > int(start)]
+        free = min(following, default=int(disk_size)) - end
         if free < MIN_GROWTH_BYTES:
-            result["reason"] = "the partition already reaches the end of the disk"
+            result["reason"] = ("another partition follows it" if following
+                                else "the partition already reaches the end of the disk")
             return result
 
         logger.info("Growing %s (partition %s of %s) by %d bytes", device, part_num, disk, free)
