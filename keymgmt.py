@@ -375,7 +375,9 @@ class PoolUnlocker:
             self.engine.execute("zfs", "load_key_file", pool_name=pool_name, keyfile_path=str(keyfile))
             # Only this pool's datasets: `zfs mount -a` would also mount every
             # other imported pool, including one belonging to another system.
-            self.engine.execute("zfs", "mount_pool", pool_name=pool_name, check=False)
+            # And only those meant to mount by themselves: `.freedomnas` is
+            # canmount=noauto and would land on this system's state directory.
+            self.engine.execute("zfs", "mount_pool_auto", pool_name=pool_name, check=False)
             logger.info("Unlocked ZFS pool: %s", pool_name)
             return True
         except (CommandExecutionError, CommandTranslationError) as exc:

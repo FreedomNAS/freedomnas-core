@@ -39,7 +39,7 @@ class FakeEngine:
             return "", ""
         if (category, action) == ("media", "unmount"):
             return "", ""
-        if (category, action) in (("zfs", "load_key_file"), ("zfs", "mount_pool"),
+        if (category, action) in (("zfs", "load_key_file"), ("zfs", "mount_pool_auto"),
                                    ("zfs", "pool_create_encrypted")):
             return "", ""
         raise AssertionError(f"unexpected call: {category}.{action}")
@@ -386,3 +386,10 @@ def test_shred_removes_the_key_even_when_it_cannot_overwrite_it(tmp_path):
     keymgmt._shred(keyfile)
 
     assert not keyfile.exists()
+
+
+def test_an_unlocked_pool_never_mounts_its_state_dataset(paths):
+    engine = FakeEngine()
+    assert keymgmt.PoolUnlocker(engine)._load_raw_key("tank", os.urandom(32))
+    mounts = [a for _, a, _ in engine.calls if a.startswith("mount")]
+    assert mounts == ["mount_pool_auto"]
