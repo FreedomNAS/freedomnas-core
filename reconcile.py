@@ -513,6 +513,8 @@ class ReconciliationEngine:
         WebUI gave such a share read access for everyone and full control to
         whoever created it; rebuild that, never more than it.
         """
+        if share.get("read_only"):
+            return "Everyone:R"
         owners = [u for u in share.get("valid_users", []) if u]
         return ",".join(["Everyone:R"] + [f"{u}:F" for u in owners])
 

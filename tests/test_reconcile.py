@@ -269,6 +269,8 @@ def test_disaster_recovery_applies_in_fixed_order():
      "Everyone:R,sarah:F,mario:R"),
     ({"name": "foto", "path": "/tank/foto", "valid_users": ["sarah"]}, "Everyone:R,sarah:F"),
     ({"name": "foto", "path": "/tank/foto"}, "Everyone:R"),
+    ({"name": "foto", "path": "/tank/foto", "valid_users": ["sarah"], "read_only": True},
+     "Everyone:R"),
 ])
 def test_a_restored_share_never_gets_more_access_than_it_had(share, acl):
     engine = FakeEngine()
