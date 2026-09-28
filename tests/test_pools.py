@@ -2,6 +2,7 @@
 
 import pytest
 
+import pools
 from pools import CommandExecutionError, attach_devices, detach_device
 
 
@@ -51,3 +52,25 @@ def test_removal_lets_zfs_refuse():
     engine = FakeEngine(failing={"pool_remove_device"})
     with pytest.raises(CommandExecutionError):
         detach_device(engine, "tank", "/dev/ssd1")
+
+
+LISTING = (
+    "tank\t240M\t186K\t240M\t-\t-\t10%\t0%\t1.00x\tONLINE\t-\n"
+    "\tmirror-0\t256M\t186K\t240M\t-\t-\t10%\t0.07%\t-\tONLINE\n"
+    "\t\t/dev/sda\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n"
+    "\t\t/dev/sdb\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n"
+    "logs              -      -      -        -         -      -\n"
+    "\tmirror-1\t256M\t0\t240M\t-\t-\t0%\t0.00%\t-\tONLINE\n"
+    "\t\t/dev/sdc\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n"
+    "\t\t/dev/sdd\t-\t-\t-\t-\t-\t-\t-\t-\tONLINE\n"
+    "cache             -      -      -        -         -      -\n"
+    "\t/dev/disk/by-id/nvme-ssd\t256M\t0\t251M\t-\t-\t0%\t0.00%\t-\tONLINE\t-\n"
+)
+
+
+def test_attached_devices_are_read_from_the_pool_itself():
+    assert pools.parse_attached(LISTING) == {"cache": ["/dev/disk/by-id/nvme-ssd"], "log": ["mirror-1"]}
+
+
+def test_a_pool_without_them_has_none():
+    assert pools.parse_attached(LISTING.split("logs")[0]) == {"cache": [], "log": []}

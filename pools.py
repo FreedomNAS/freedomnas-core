@@ -65,3 +65,39 @@ def detach_device(engine, pool_name: str, device: str) -> None:
     """
     engine.execute("zfs", "pool_remove_device", pool_name=pool_name, device=device)
     logger.info("Removed %s from %s", device, pool_name)
+
+
+SECTIONS = {"cache": "cache", "logs": "log"}
+
+
+def parse_attached(listing: str) -> Dict[str, List[str]]:
+    """
+    The cache and log vdevs in `zpool list -vHP`. Their section headings
+    ("cache", "logs") are the only lines that do not start with a tab; the
+    vdevs one tab in are what `zpool remove` takes — a device, or the
+    mirror-N of a mirrored log.
+    """
+    found: Dict[str, List[str]] = {"cache": [], "log": []}
+    section = None
+    for line in listing.splitlines()[1:]:
+        if not line.strip():
+            continue
+        if not line.startswith("\t"):
+            section = SECTIONS.get(line.split()[0])
+            continue
+        if section and not line.startswith("\t\t"):
+            name = line.strip().split("\t")[0]
+            if name:
+                found[section].append(name)
+    return found
+
+
+def attached(engine, pool_name: str) -> Optional[Dict[str, List[str]]]:
+    """What is attached to the pool as cache or log right now, or None if ZFS cannot say."""
+    try:
+        stdout, _ = engine.execute("zfs", "pool_leaf_devices", pool_name=pool_name, check=False)
+    except (CommandExecutionError, CommandTranslationError):
+        return None
+    if not stdout.strip():
+        return None
+    return parse_attached(stdout)
