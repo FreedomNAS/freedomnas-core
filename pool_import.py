@@ -187,6 +187,15 @@ def mount_conflicts(datasets: List[Dict], mountpoints: Dict[str, str],
     return conflicts
 
 
+def is_system_path(path: str) -> bool:
+    return _system_path(path)
+
+
+def occupied(path: str) -> Optional[str]:
+    """Why a dataset must not be mounted at `path`, or None."""
+    return _occupied(path)
+
+
 def mountpoint_problem(path: str) -> Optional[str]:
     if not path.startswith("/") or path != posixpath.normpath(path):
         return "The mountpoint must be an absolute path, like /mnt/tank"
