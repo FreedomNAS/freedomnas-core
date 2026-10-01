@@ -379,3 +379,17 @@ class TestConfigPathDiscovery:
         monkeypatch.setattr(ConfigurationManager, "DEFAULT_CONFIG_PATH", primary)
         monkeypatch.setattr(ConfigurationManager, "BACKUP_CONFIG_PATH", backup)
         assert ConfigurationManager()._find_config_path() == backup
+
+    def test_a_pending_setup_outlasts_a_restored_configuration(self, tmp_path, monkeypatch):
+        marker = tmp_path / "setup-pending"
+        monkeypatch.setattr(ConfigurationManager, "SETUP_PENDING_PATH", marker)
+        manager = ConfigurationManager(str(tmp_path / "config.yaml"))
+        manager.mark_initialized("debian")
+        assert not manager.needs_setup()
+
+        marker.touch()
+        assert manager.setup_pending() and manager.needs_setup()
+
+        manager.clear_setup_pending()
+        assert not marker.exists() and not manager.needs_setup()
+        manager.clear_setup_pending()

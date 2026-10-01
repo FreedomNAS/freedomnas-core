@@ -72,8 +72,12 @@ class FakeEngine:
 
 
 class FakeConfig:
-    def __init__(self, state=None):
+    def __init__(self, state=None, pending=False):
         self.state = state or {}
+        self.pending = pending
+
+    def setup_pending(self):
+        return self.pending
 
     def to_dict(self):
         return self.state
@@ -126,9 +130,9 @@ def test_root_is_never_among_the_observed_users():
 # compute_diff
 # ---------------------------------------------------------------------------
 
-def diff(desired, current=None, mode=ReconcileMode.DECLARATIVE, engine=None):
+def diff(desired, current=None, mode=ReconcileMode.DECLARATIVE, engine=None, config=None):
     base = {"system": {}, "storage": {"pools": []}, "users": [], "smb_shares": [], "nfs_shares": []}
-    return reconciler(engine).compute_diff(desired, {**base, **(current or {})}, mode=mode)
+    return reconciler(engine, config).compute_diff(desired, {**base, **(current or {})}, mode=mode)
 
 
 def test_hostname_and_timezone_change_only_when_they_differ():
@@ -347,6 +351,14 @@ def test_an_nfs_export_without_hosts_is_not_opened_to_everyone():
     result = reconciler(engine)._do_nfs_share_create({"name": "foto", "path": "/tank/foto"})
     assert result.target_state == "skipped"
     assert ("nfs", "export_add") not in engine.actions()
+
+
+def test_ssh_stays_off_until_a_restored_image_is_set_up():
+    desired = {"system": {"ssh_enabled": True}}
+    [ssh] = diff(desired)
+    assert ssh.new_value is True
+    [ssh] = diff(desired, config=FakeConfig(pending=True))
+    assert (ssh.path, ssh.new_value) == ("system.ssh", False)
 
 
 def test_ssh_is_turned_on_or_off_as_recorded():

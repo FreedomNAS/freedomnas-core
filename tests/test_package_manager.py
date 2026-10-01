@@ -101,10 +101,9 @@ def test_early_services_come_from_init_overlay(pm):
     assert "zfs-import" in early or "zfs-mount" in early
 
 
-def test_pkgbuilds_for_artix_openrc(pm):
-    pkgbuilds = pm.get_pkgbuilds_for_os("core", "artix", init_system="openrc")
-    assert any(p["name"] == "zfs-openrc" for p in pkgbuilds)
-    assert all({"name", "git"} <= p.keys() for p in pkgbuilds)
+def test_artix_openrc_gets_zfs_openrc_from_the_repository(pm):
+    assert "zfs-openrc" in pm.get_packages_for_os("core", "artix", init_system="openrc")
+    assert pm.get_pkgbuilds_for_os("core", "artix", init_system="openrc") == []
 
 
 def test_pkgbuilds_empty_without_matching_init(pm):

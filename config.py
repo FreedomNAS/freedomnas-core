@@ -43,6 +43,7 @@ class ConfigurationManager:
     # None means "from the OS profile"; tests point them somewhere else.
     DEFAULT_CONFIG_PATH: Optional[Path] = None
     BACKUP_CONFIG_PATH: Optional[Path] = None
+    SETUP_PENDING_PATH: Optional[Path] = None
     
     # Default configuration template
     DEFAULT_CONFIG = {
@@ -350,6 +351,26 @@ class ConfigurationManager:
         """Check if the system has been initialized"""
         return self.config["system"]["initialized"]
     
+    @classmethod
+    def setup_pending_path(cls) -> Path:
+        """
+        A file a disk image leaves on its system disk. It stays until someone
+        has set the system up here, so a configuration restored from an
+        attached pool cannot stand in for that: it would keep the image's
+        shipped administrator and password.
+        """
+        return cls.SETUP_PENDING_PATH or paths.config_dir() / "setup-pending"
+
+    def setup_pending(self) -> bool:
+        return self.setup_pending_path().exists()
+
+    def clear_setup_pending(self) -> None:
+        self.setup_pending_path().unlink(missing_ok=True)
+
+    def needs_setup(self) -> bool:
+        """Whether the WebUI must send everyone to the setup wizard first."""
+        return not self.is_initialized() or self.setup_pending()
+
     def mark_initialized(self, edition: str, initialized_by: str = "installer") -> None:
         """
         Mark the system as initialized.

@@ -247,6 +247,7 @@ def cmd_path(args) -> int:
             "state":        paths.state_dir,
             "tls":          paths.tls_dir,
             "keyslots":     paths.keyslot_dir,
+            "setup-pending": lambda: paths.config_dir() / "setup-pending",
         }[args.name]
         print(resolve())
     except Exception as exc:
@@ -415,7 +416,7 @@ def main() -> int:
         help="Name to put in the certificate (default: the system hostname)",
     )
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
-    path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots"])
+    path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending"])
     sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
     sub.add_parser("version", help="Print package version")
 

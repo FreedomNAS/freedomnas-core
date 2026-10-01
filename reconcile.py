@@ -294,7 +294,8 @@ class ReconciliationEngine:
 
         ssh = desired.get("system", {}).get("ssh_enabled")
         if ssh is not None:
-            changes.append(Change("system.ssh", None, bool(ssh), "ensure"))
+            enabled = bool(ssh) and not self.config.setup_pending()
+            changes.append(Change("system.ssh", None, enabled, "ensure"))
 
         removals_allowed = mode == ReconcileMode.DECLARATIVE and self._names_an_admin(desired)
         if mode == ReconcileMode.DECLARATIVE and not removals_allowed:
