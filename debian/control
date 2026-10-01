@@ -11,7 +11,7 @@ Vcs-Git: https://codeberg.org/freedomnas/freedomnas-core.git
 Package: freedomnas-core
 Architecture: all
 Depends: ${python3:Depends}, ${misc:Depends}, python3 (>= 3.8), python3-yaml, python3-cryptography, freedomnas-profiles
-Recommends: zfsutils-linux | zfs-fuse
+Recommends: zfsutils-freedomnas | zfsutils-linux | zfs-fuse
 Description: FreedomNAS Core Engine — OS-agnostic storage appliance
  The FreedomNAS Core Engine provides:
   • Universal OS abstraction via JSON Translator Layer
