@@ -70,9 +70,9 @@ SERVICE_START_BY_INIT = {
     "systemd": "systemctl start samba",
     "openrc":  "rc-service samba start",
     "runit":   "sv start samba",
-    "s6":      "s6-svc -u /run/service/samba",
+    "s6":      "s6 live start samba",
     "dinit":   "dinitctl start samba",
-    "bsd_rc":  "service samba start",
+    "bsd_rc":  "service samba status >/dev/null 2>&1 || service samba start",
 }
 
 
@@ -509,12 +509,13 @@ class TestForTarget:
         """A target engine must never probe the running host for its init."""
         target = FreedomNASEngine.for_target("freebsd", profile_dir=PROFILES_DIR)
         assert target.init_system == "bsd_rc"
-        assert "sysrc" in target.get_command("services", "enable", service_name="sshd")
+        assert target.get_command("services", "enable", service_name="sshd") == "service sshd enable"
 
     @pytest.mark.parametrize("init_system,smb,nfs", [
         ("openrc", "smb", "nfs"),
         ("dinit", "smbd", "nfs-server"),
         ("runit", "smbd", "nfs-server"),
+        ("s6", "smbd", "nfs-server"),
     ])
     def test_by_init_values_follow_the_init_system(self, init_system, smb, nfs):
         target = FreedomNASEngine.for_target(
