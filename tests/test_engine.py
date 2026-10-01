@@ -511,6 +511,19 @@ class TestForTarget:
         assert target.init_system == "bsd_rc"
         assert "sysrc" in target.get_command("services", "enable", service_name="sshd")
 
+    @pytest.mark.parametrize("init_system,smb,nfs", [
+        ("openrc", "smb", "nfs"),
+        ("dinit", "smbd", "nfs-server"),
+        ("runit", "smbd", "nfs-server"),
+    ])
+    def test_by_init_values_follow_the_init_system(self, init_system, smb, nfs):
+        target = FreedomNASEngine.for_target(
+            "artix", profile_dir=PROFILES_DIR, init_system=init_system
+        )
+        assert target.get_profile_value("samba", "smb_service") == smb
+        assert target.get_profile_value("nfs", "nfs_service") == nfs
+        assert "by_init" not in target.get_profile_section("samba")
+
     def test_init_system_can_be_overridden(self):
         target = FreedomNASEngine.for_target(
             "debian", profile_dir=PROFILES_DIR, init_system="openrc"

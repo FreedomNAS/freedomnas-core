@@ -434,7 +434,8 @@ class FreedomNASEngine:
         Steps:
         1. Load the shared OS profile (profiles/os/os-{os_type}.json)
         2. Merge in each module's profiles/{module}/{module}-{os_type}.json
-        3. Detect the running init system
+        3. Detect the running init system, then apply each section's
+           "by_init" values for it
         4. Load init profile (e.g. init/init-systemd.json)
         5. Merge: init profile's "services" replaces OS profile's "services"
         6. Backward compat: if no init profile found and OS profile has
@@ -478,6 +479,10 @@ class FreedomNASEngine:
             init_system = profile.get("init_system", "systemd")
         else:
             init_system = self._detect_init_system(profile)
+
+        for section in profile.values():
+            if isinstance(section, dict) and "by_init" in section:
+                section.update(section.pop("by_init").get(init_system, {}))
 
         # Load and merge init profile
         init_profile = self._load_init_profile(init_system)
