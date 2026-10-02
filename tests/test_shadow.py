@@ -102,8 +102,11 @@ class MountingEngine(FakeEngine):
         super().__init__(**kwargs)
         self.state = state
         self.storage = storage
+        self.destroyed = []
 
     def execute(self, category, action, **kwargs):
+        if action == "dataset_at_path" and kwargs["path"] == str(self.state):
+            return (self.active or ""), ""
         if action == "unmount_at":
             for dataset, mountpoint in self.mounted.items():
                 if mountpoint == kwargs["mountpoint"]:
@@ -114,12 +117,31 @@ class MountingEngine(FakeEngine):
                         f.unlink()
             return "", ""
         if action == "mount_dataset":
+            if kwargs["dataset"] in self.fail_mount:
+                raise shadow.CommandExecutionError(f"cannot mount {kwargs['dataset']}")
             source = self.storage / kwargs["dataset"].replace("/", "_")
             for f in source.iterdir():
                 (self.state / f.name).write_bytes(f.read_bytes())
             self.active = kwargs["dataset"]
             return "", ""
+        if action == "unmount_dataset":
+            assert kwargs["dataset"] == self.active
+            target = self.storage / self.active.replace("/", "_")
+            target.mkdir(exist_ok=True)
+            for f in self.state.iterdir():
+                (target / f.name).write_bytes(f.read_bytes())
+                f.unlink()
+            self.active = None
+            return "", ""
+        if action == "dataset_destroy":
+            assert kwargs["dataset"] != self.active, "destroyed the dataset serving the state"
+            self.datasets.discard(kwargs["dataset"])
+            self.destroyed.append(kwargs["dataset"])
+            return "", ""
         return super().execute(category, action, **kwargs)
+
+    fail_mount = ()
+    destroyed: list
 
 
 def test_the_setup_moves_the_configuration_onto_the_chosen_pool(tmp_path, monkeypatch):
@@ -145,12 +167,42 @@ def test_activating_the_pool_already_serving_the_state_does_nothing():
     assert engine.created == [] and engine.mounted == {}
 
 
-def test_a_state_already_served_from_another_pool_is_not_moved():
-    engine = FakeEngine(pools=["rpool", "tank"], datasets=["rpool/.freedomnas"], active="rpool/.freedomnas")
+def _served_from_rpool(tmp_path, monkeypatch):
+    """An image's layout: the state already lives on the root pool's dataset."""
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "config.yaml").write_text("system:\n  hostname: nas\n")
+    storage = tmp_path / "zfs"
+    storage.mkdir()
+    monkeypatch.setattr(shadow.paths, "state_dir", lambda engine=None: state)
+    engine = MountingEngine(state, storage, pools=["rpool", "tank"],
+                            datasets=["rpool/.freedomnas"], active="rpool/.freedomnas")
+    return engine, state, storage
+
+
+def test_a_state_served_from_the_root_pool_moves_and_the_old_dataset_goes(tmp_path, monkeypatch):
+    engine, state, storage = _served_from_rpool(tmp_path, monkeypatch)
+
+    assert shadow.activate(engine, "tank") == "tank/.freedomnas"
+
+    assert engine.active == "tank/.freedomnas"
+    assert (storage / "tank_.freedomnas" / "config.yaml").read_text() == "system:\n  hostname: nas\n"
+    assert (state / "config.yaml").read_text() == "system:\n  hostname: nas\n"
+    assert engine.destroyed == ["rpool/.freedomnas"]
+    assert "rpool/.freedomnas" not in engine.datasets
+
+
+def test_a_move_that_cannot_mount_the_new_dataset_keeps_the_old_one(tmp_path, monkeypatch):
+    engine, state, _ = _served_from_rpool(tmp_path, monkeypatch)
+    engine.fail_mount = ("tank/.freedomnas",)
+
     try:
         shadow.activate(engine, "tank")
-    except shadow.CommandExecutionError as exc:
-        assert "rpool/.freedomnas" in str(exc)
+    except shadow.CommandExecutionError:
+        pass
     else:
-        raise AssertionError("activate moved a configuration already served from another pool")
-    assert engine.created == []
+        raise AssertionError("activate reported success without mounting the new dataset")
+
+    assert engine.active == "rpool/.freedomnas"
+    assert engine.destroyed == []
+    assert (state / "config.yaml").read_text() == "system:\n  hostname: nas\n"

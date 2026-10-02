@@ -134,21 +134,22 @@ def activate(engine, pool: str, state: Optional[Path] = None) -> str:
     Make `<pool>/.freedomnas` the live state: create it if needed, move what
     the state directory holds into it, and mount it there.
 
-    This is how a system installed from an image, which ships without a
-    `.freedomnas`, gets one: the setup wizard writes the configuration to
-    the plain directory first, then hands it to the pool the administrator
-    chose. The copies left on the root filesystem are removed, so a boot
-    where the dataset fails to mount cannot serve a stale configuration.
+    This is how the setup wizard hands the configuration to the pool the
+    administrator chose. The copies left on the root filesystem are removed,
+    so a boot where the dataset fails to mount cannot serve a stale
+    configuration.
+
+    Images and installs ship the state on the root pool's `.freedomnas`, and
+    a reinstall wipes that disk — so when another pool is chosen, the state
+    moves there and the old dataset is destroyed: two datasets mounting at
+    the same place must never both exist. It is destroyed only once the new
+    one is mounted; if that mount fails, the old one is mounted back.
     """
     dataset = f"{pool}/{DATASET_NAME}"
     state = Path(state) if state else paths.state_dir(engine)
     current = active_dataset(engine)
     if current == dataset:
         return dataset
-    if current:
-        raise CommandExecutionError(
-            f"the configuration is already served from {current}; moving it is not supported here"
-        )
 
     ensure_dataset(engine, pool)
     mountpoint = tempfile.mkdtemp(prefix="freedomnas-state.")
@@ -163,6 +164,8 @@ def activate(engine, pool: str, state: Optional[Path] = None) -> str:
         except OSError:
             pass
 
+    if current:
+        engine.execute("zfs", "unmount_dataset", dataset=current)
     if state.is_dir():
         for entry in state.iterdir():
             if entry.is_dir() and not entry.is_symlink():
@@ -170,6 +173,14 @@ def activate(engine, pool: str, state: Optional[Path] = None) -> str:
             else:
                 entry.unlink()
     state.mkdir(parents=True, exist_ok=True)
-    engine.execute("zfs", "mount_dataset", dataset=dataset)
+    try:
+        engine.execute("zfs", "mount_dataset", dataset=dataset)
+    except (CommandExecutionError, CommandTranslationError):
+        if current:
+            engine.execute("zfs", "mount_dataset", dataset=current)
+        raise
+    if current:
+        engine.execute("zfs", "dataset_destroy", dataset=current)
+        logger.info("Destroyed %s: the configuration moved off it", current)
     logger.info("The configuration now lives on %s", dataset)
     return dataset
