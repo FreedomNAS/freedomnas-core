@@ -152,3 +152,27 @@ def test_every_edition_installs_a_boot_chain(edition):
         f"os-{edition}.json declares no way to install a boot chain: "
         f"the installer would finish leaving the ESP empty"
     )
+
+
+@pytest.mark.parametrize("edition", EDITIONS)
+def test_no_fragment_replaces_a_section_of_another(edition):
+    """
+    The fragments are merged with a plain dict.update(): a category a
+    fragment shares with the OS profile or with another fragment replaces
+    it whole. A `paths` category in storage-*.json once wiped the OS
+    profile's `paths` (install_root, config_dir) on every edition.
+    """
+    owners = {key: f"os-{edition}.json"
+              for key in json.loads((PROFILES / "os" / f"os-{edition}.json").read_text())}
+    clashes = []
+    for entry in sorted(PROFILES.iterdir()):
+        if not entry.is_dir() or entry.name in {"os", "init", "packages", "assets"}:
+            continue
+        fragment = entry / f"{entry.name}-{edition}.json"
+        if not fragment.exists():
+            continue
+        for key in json.loads(fragment.read_text()):
+            if key in owners:
+                clashes.append(f"{fragment.name} redefines {key!r} from {owners[key]}")
+            owners[key] = fragment.name
+    assert not clashes, "\n  ".join(["sections replaced by a later fragment:"] + clashes)

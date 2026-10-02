@@ -238,3 +238,83 @@ def destroy(engine, name: str, recursive: bool = False) -> None:
                 f"{len(found['snapshots'])} snapshot(s): tick that they go too")
     engine.execute("zfs", "dataset_destroy_recursive" if recursive else "dataset_destroy",
                    dataset=name, timeout=300)
+
+
+# ---------------------------------------------------------------------------
+# Owner
+#
+# A new dataset's directory belongs to root, mode 755: shared over SMB or NFS
+# it can be read and never written. Handing it to one account — owner, mode
+# 700 — makes it that account's alone, for the shares too, since Samba and
+# NFS reach it as that user. Only the directory a dataset mounts on is ever
+# handed over, never what is inside it nor any other directory.
+# ---------------------------------------------------------------------------
+
+OWNER_MODE = "0700"
+
+
+def dataset_mounted_at(engine, path: str) -> Optional[str]:
+    """
+    The dataset whose own mountpoint is `path` and that may change hands, or
+    None: a subdirectory, a system directory or a protected dataset.
+    """
+    path = posixpath.normpath(path) if path.startswith("/") else ""
+    if not path:
+        return None
+    try:
+        stdout, _ = engine.execute("zfs", "dataset_at_path", path=path, check=False)
+    except (CommandExecutionError, CommandTranslationError):
+        return None
+    name = stdout.strip()
+    if not name or "\n" in name:
+        return None
+    try:
+        mountpoint, _ = mountpoint_of(engine, name)
+    except (CommandExecutionError, CommandTranslationError):
+        return None
+    if mountpoint != path or protected_reason(name, root_pool(engine), mountpoint):
+        return None
+    return name
+
+
+def owner_of(engine, path: str) -> str:
+    stdout, _ = engine.execute("directories", "owner_get", path=path)
+    return stdout.strip()
+
+
+def give_to(engine, path: str, owner: str) -> str:
+    """Make the directory `path` mounts a dataset on `owner`'s alone. Returns the dataset."""
+    name = dataset_mounted_at(engine, path)
+    if not name:
+        raise DatasetProblem(
+            f"{path} is not where a dataset of a data pool is mounted: its owner stays as it is")
+    try:
+        engine.execute("users", "get_user_info", username=owner)
+    except CommandExecutionError:
+        raise DatasetProblem(f"There is no account named {owner}")
+    engine.execute("directories", "owner_set", owner=owner, path=path)
+    engine.execute("directories", "mode_set", mode=OWNER_MODE, path=path)
+    return name
+
+
+def nfs_export_options(engine, share: dict) -> str:
+    """
+    The options an NFS share is exported with. NFS has no login: the server
+    takes the client's word for the user ID, and an ID that differs between
+    the client and the NAS is someone else. A share whose directory was
+    given to its owner (`map_to_owner`) maps every client user onto that
+    owner (`nfs.owner_options`), and the hosts allowed to mount it decide
+    who that is. The mapping is added when the export is written, never
+    recorded in `options`: the IDs are this system's, and a restore or a
+    moved dataset writes the export again.
+    """
+    options = share.get("options") or "rw,sync,no_subtree_check"
+    owner = share.get("owner")
+    if not share.get("map_to_owner") or not owner:
+        return options
+    stdout, _ = engine.execute("users", "get_user_info", username=owner)
+    fields = stdout.strip().split(":")
+    if len(fields) < 4 or not fields[2].isdigit() or not fields[3].isdigit():
+        raise CommandExecutionError(f"Cannot read the user and group ID of {owner}")
+    template = engine.get_profile_value("nfs", "owner_options")
+    return options + template.format(owner=owner, uid=fields[2], gid=fields[3])

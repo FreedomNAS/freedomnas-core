@@ -222,6 +222,37 @@ def test_an_export_in_another_syntax_is_known_by_its_path(tmp_path):
     assert paths(reconciler(engine, config).plan()) == [("nfs_shares./tank/old", "remove")]
 
 
+class PasswdEngine(FakeEngine):
+    """Accounts answer get_user_info with their passwd line, as getent does."""
+
+    def execute(self, category, action, **kwargs):
+        if (category, action) == ("users", "get_user_info") and kwargs["username"] in self.users:
+            self.calls.append((category, action, kwargs))
+            return f"{kwargs['username']}:x:1001:1001::/home/{kwargs['username']}:/bin/sh", ""
+        return super().execute(category, action, **kwargs)
+
+
+OWNER_OPTIONS = {("nfs", "owner_options"): ",all_squash,anonuid={uid},anongid={gid}"}
+ANNA_SHARE = {"name": "anna", "path": "/tank/anna", "allowed_hosts": "10.0.0.5",
+              "options": "rw", "owner": "anna", "map_to_owner": True}
+
+
+def test_an_export_mapped_onto_its_owner_matches_its_line():
+    engine = PasswdEngine(users={"sarah": ["sudo"], "anna": []}, values=OWNER_OPTIONS)
+    current = {"users": [{"username": "sarah", "groups": ["sudo"]}],
+               "nfs_shares": [{"path": "/tank/anna", "allowed_hosts": "10.0.0.5",
+                               "options": "rw,all_squash,anonuid=1001,anongid=1001"}]}
+    assert diff({"users": [ADMIN], "nfs_shares": [ANNA_SHARE]}, current, engine=engine) == []
+
+
+def test_an_export_that_lost_its_mapping_is_written_again():
+    engine = PasswdEngine(users={"sarah": ["sudo"], "anna": []}, values=OWNER_OPTIONS)
+    current = {"users": [{"username": "sarah", "groups": ["sudo"]}],
+               "nfs_shares": [{"path": "/tank/anna", "allowed_hosts": "10.0.0.5", "options": "rw"}]}
+    assert paths(diff({"users": [ADMIN], "nfs_shares": [ANNA_SHARE]}, current, engine=engine)) == [
+        ("nfs_shares./tank/anna", "remove"), ("nfs_shares.anna", "add")]
+
+
 def test_additive_leaves_a_differing_nfs_export_alone():
     share = {"name": "foto", "path": "/tank/foto", "allowed_hosts": "10.0.0.0/8", "options": "ro"}
     current = {"nfs_shares": [{"path": "/tank/foto", "allowed_hosts": "*", "options": "rw"}]}

@@ -27,6 +27,7 @@ try:
         CommandTranslationError,
     )
     from freedomnas.config import ConfigurationManager
+    from freedomnas.datasets import nfs_export_options
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -34,6 +35,7 @@ except ImportError:
         CommandTranslationError,
     )
     from config import ConfigurationManager  # type: ignore[no-redef]
+    from datasets import nfs_export_options  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
 
@@ -313,7 +315,7 @@ class ReconciliationEngine:
         have_lines = {_export_line(e) for e in observed_exports or [] if not e.get("opaque")}
         opaque_paths = {e["path"] for e in observed_exports or [] if e.get("opaque")}
         have_paths = {line[0] for line in have_lines} | opaque_paths
-        want = {_export_line(s): s for s in desired.get("nfs_shares", []) if s.get("path")}
+        want = {self._wanted_export_line(s): s for s in desired.get("nfs_shares", []) if s.get("path")}
         want_paths = {line[0] for line in want}
         if removals_allowed:
             for export in observed_exports or []:
@@ -602,6 +604,20 @@ class ReconciliationEngine:
             return ActionResult(action="samba.delete_share", params=params, target_state="failed", error=str(exc))
 
     # ------------------------------------------------------------------
+    def _wanted_export_line(self, share: dict) -> tuple:
+        """
+        The line a recorded share is exported as: with the mapping onto its
+        owner when it has one, which is in /etc/exports but not in the
+        recorded options. An owner who does not exist yet (a restore creates
+        the users later) cannot match a line anyway.
+        """
+        path, clients, options = _export_line(share)
+        try:
+            options = nfs_export_options(self.engine, share)
+        except (CommandExecutionError, CommandTranslationError):
+            pass
+        return path, clients, options
+
     # Internal — atomic engine calls: NFS exports
     # ------------------------------------------------------------------
 
@@ -624,7 +640,7 @@ class ReconciliationEngine:
                 "nfs", "export_add",
                 path=path,
                 clients=clients,
-                options=options or "rw,sync,no_subtree_check",
+                options=nfs_export_options(self.engine, {**share, "options": options}),
             )
             self.engine.execute("nfs", "exportfs_reload")
             logger.info("NFS export %s → %s", path, clients)
