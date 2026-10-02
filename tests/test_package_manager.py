@@ -54,7 +54,7 @@ def test_required_and_optional_categories(pm):
 
 def test_packages_for_debian(pm):
     packages = pm.get_packages_for_os("core", "debian")
-    assert "zfsutils-linux" in packages
+    assert "zfsutils-freedomnas" in packages
     assert "python3" in packages
 
 
@@ -140,7 +140,7 @@ def test_get_all_packages_for_os_defaults_to_optional_categories(pm):
 def test_get_all_packages_for_os_with_explicit_categories(pm):
     result = pm.get_all_packages_for_os("debian", categories=["core"])
     assert list(result.keys()) == ["core"]
-    assert "zfsutils-linux" in result["core"]
+    assert "zfsutils-freedomnas" in result["core"]
 
 
 def test_config_paths(pm):
