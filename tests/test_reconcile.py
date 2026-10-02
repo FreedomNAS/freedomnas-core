@@ -253,6 +253,15 @@ def test_an_export_that_lost_its_mapping_is_written_again():
         ("nfs_shares./tank/anna", "remove"), ("nfs_shares.anna", "add")]
 
 
+def test_the_nfsv4_root_line_is_not_an_export(tmp_path):
+    exports = tmp_path / "exports"
+    exports.write_text("# comment\nV4: /\n/tank/foto -mapall=anna -network 10.0.0.0/24\n")
+    engine = FakeEngine(users={"sarah": ["sudo"]}, exports_file=exports)
+    share = {"name": "foto", "path": "/tank/foto", "allowed_hosts": "10.0.0.0/24"}
+    config = FakeConfig({"users": [ADMIN], "nfs_shares": [share]})
+    assert paths(reconciler(engine, config).plan()) == []
+
+
 def test_additive_leaves_a_differing_nfs_export_alone():
     share = {"name": "foto", "path": "/tank/foto", "allowed_hosts": "10.0.0.0/8", "options": "ro"}
     current = {"nfs_shares": [{"path": "/tank/foto", "allowed_hosts": "*", "options": "rw"}]}

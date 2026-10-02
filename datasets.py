@@ -308,7 +308,7 @@ def nfs_export_options(engine, share: dict) -> str:
     recorded in `options`: the IDs are this system's, and a restore or a
     moved dataset writes the export again.
     """
-    options = share.get("options") or "rw,sync,no_subtree_check"
+    options = share.get("options") or engine.get_profile_value("nfs", "default_options")
     owner = share.get("owner")
     if not share.get("map_to_owner") or not owner:
         return options

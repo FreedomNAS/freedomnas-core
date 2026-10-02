@@ -229,7 +229,8 @@ class ReconciliationEngine:
         exports = []
         for line in lines:
             line = line.strip()
-            if not line or line.startswith("#"):
+            # FreeBSD's `V4:` line is the NFSv4 root, not an export.
+            if not line or line.startswith("#") or line.startswith("V4:"):
                 continue
             fields = line.split()
             if len(fields) == 2 and "(" in fields[1]:
