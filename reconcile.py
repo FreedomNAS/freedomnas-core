@@ -27,7 +27,7 @@ try:
         CommandTranslationError,
     )
     from freedomnas.config import ConfigurationManager
-    from freedomnas.datasets import nfs_export_options
+    from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas import usershares
 except ImportError:
     from engine import (  # type: ignore[no-redef]
@@ -36,7 +36,7 @@ except ImportError:
         CommandTranslationError,
     )
     from config import ConfigurationManager  # type: ignore[no-redef]
-    from datasets import nfs_export_options  # type: ignore[no-redef]
+    from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -395,6 +395,7 @@ class ReconciliationEngine:
     def _apply_changes(self, changes: List[Change]) -> List[ActionResult]:
         results: List[ActionResult] = []
         usershares_ready = False
+        groups_checked: Set[str] = set()
         for change in changes:
             path, kind = change.path, change.change_type
 
@@ -424,7 +425,13 @@ class ReconciliationEngine:
             elif path.startswith("features."):
                 results.extend(self._do_service_enable(change.new_value["id"]))
 
-            elif path.startswith("smb_shares."):
+            if (path.startswith(("smb_shares.", "nfs_shares.")) and kind != "remove"
+                    and change.new_value.get("owner") and change.new_value.get("path")
+                    and change.new_value["path"] not in groups_checked):
+                groups_checked.add(change.new_value["path"])
+                results.extend(self._do_owner_group(change.new_value))
+
+            if path.startswith("smb_shares."):
                 if kind == "remove":
                     results.append(self._do_smb_share_delete(path.split(".", 1)[1]))
                 else:
@@ -621,6 +628,33 @@ class ReconciliationEngine:
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: SMB shares
     # ------------------------------------------------------------------
+
+    def _do_owner_group(self, share: dict) -> List[ActionResult]:
+        """
+        A share's directory given to its owner carries the edition's group
+        for it (the owner's own on Linux, wheel on FreeBSD). Files restored
+        from another edition carry that one's: when the directory itself
+        has another group, the whole tree is given the right one, once;
+        at the next boot the directory already matches and nothing runs.
+        """
+        path, owner = share["path"], share["owner"]
+        try:
+            want = owner_group(self.engine, owner)
+            stdout, _ = self.engine.execute("directories", "group_get", path=path, check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            return []
+        have = stdout.strip()
+        if not have or have == want:
+            return []
+        params = {"path": path, "group": want}
+        try:
+            self.engine.execute("directories", "group_set_recursive", group=want, path=path, timeout=3600)
+            logger.info("Group of %s: %s -> %s", path, have, want)
+            return [ActionResult(action="directories.group_set_recursive", params=params, target_state="applied")]
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.error("Could not give %s the group %s: %s", path, want, exc)
+            return [ActionResult(action="directories.group_set_recursive", params=params,
+                                 target_state="failed", error=str(exc))]
 
     def _do_usershares_prepare(self) -> ActionResult:
         """A restored configuration's shares reach a system no wizard has prepared."""

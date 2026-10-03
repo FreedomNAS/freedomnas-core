@@ -26,10 +26,11 @@ class FakeEngine:
 
     def __init__(self, imported_pools=(), users=None, smb_shares=(), exports_file=None,
                  hostname="nas", timezone="UTC", values=None, failing=(),
-                 taken_uids=(), owners=None):
+                 taken_uids=(), owners=None, groups=None):
         self.imported_pools = list(imported_pools)
         self.taken_uids = {str(u) for u in taken_uids}
         self.owners = dict(owners or {})
+        self.groups = dict(groups or {})
         self.users = dict(users or {})
         self.smb_shares = list(smb_shares)
         self.hostname = hostname
@@ -61,6 +62,8 @@ class FakeEngine:
             return (name if name in self.users or name in self.taken_uids else ""), ""
         if key == ("directories", "owner_uid_get"):
             return self.owners.get(kwargs["path"], ""), ""
+        if key == ("directories", "group_get"):
+            return self.groups.get(kwargs["path"], ""), ""
         if key == ("samba", "list_shares"):
             return "\n".join(self.smb_shares), ""
         return "", ""
@@ -537,3 +540,35 @@ def test_a_uid_taken_here_is_not_reused():
         [Change("users.luca", None, {"username": "luca", "uid": 1003}, "add")])
     assert _created(engine) == [("create", "luca", "")]
     assert results[0].target_state == "applied"
+
+
+LINUX_GROUP = {("directories", "owner_group"): "{owner}", ("samba", "config_file"): "/dev/null",
+               ("samba", "usershare_path"): "/var/lib/samba/usershares", ("samba", "smb_service"): "smb",
+               ("nfs", "default_options"): "rw"}
+
+
+def _regrouped(engine):
+    return [(kw["path"], kw["group"]) for c, a, kw in engine.calls if a == "group_set_recursive"]
+
+
+def test_a_restored_share_takes_the_editions_group_once(tmp_path):
+    """FreeBSD left its files in wheel (gid 0); on Linux they go to the owner's group."""
+    values = {**LINUX_GROUP, ("samba", "config_file"): str(tmp_path / "smb.conf")}
+    engine = FakeEngine(values=values, groups={"/tank/documenti": "root\n", "/tank/foto": "anna\n"})
+    reconciler(engine)._apply_changes([
+        Change("smb_shares.documenti", None, {"name": "documenti", "path": "/tank/documenti", "owner": "luca"}, "ensure"),
+        Change("nfs_shares.documenti", None, {"name": "documenti", "path": "/tank/documenti", "owner": "luca",
+                                              "allowed_hosts": "*"}, "add"),
+        Change("smb_shares.foto", None, {"name": "foto", "path": "/tank/foto", "owner": "anna"}, "ensure"),
+        Change("smb_shares.media", None, {"name": "media", "path": "/tank/media"}, "ensure"),
+    ])
+    assert _regrouped(engine) == [("/tank/documenti", "luca")]
+
+
+def test_on_freebsd_the_group_is_wheel(tmp_path):
+    values = {**LINUX_GROUP, ("directories", "owner_group"): "wheel",
+              ("samba", "config_file"): str(tmp_path / "smb.conf")}
+    engine = FakeEngine(values=values, groups={"/tank/documenti": "luca\n"})
+    reconciler(engine)._apply_changes([
+        Change("smb_shares.documenti", None, {"name": "documenti", "path": "/tank/documenti", "owner": "luca"}, "ensure")])
+    assert _regrouped(engine) == [("/tank/documenti", "wheel")]

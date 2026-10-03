@@ -282,6 +282,15 @@ def owner_of(engine, path: str) -> str:
     return stdout.strip()
 
 
+def owner_group(engine, owner: str) -> str:
+    """
+    The group a directory given to `owner` belongs to, by the edition's
+    convention (`directories.owner_group`): the owner's own group on Linux,
+    wheel on FreeBSD, where a new file takes its directory's group.
+    """
+    return engine.get_profile_value("directories", "owner_group").format(owner=owner)
+
+
 def give_to(engine, path: str, owner: str) -> str:
     """Make the directory `path` mounts a dataset on `owner`'s alone. Returns the dataset."""
     name = dataset_mounted_at(engine, path)
@@ -293,6 +302,7 @@ def give_to(engine, path: str, owner: str) -> str:
     except CommandExecutionError:
         raise DatasetProblem(f"There is no account named {owner}")
     engine.execute("directories", "owner_set", owner=owner, path=path)
+    engine.execute("directories", "group_set", group=owner_group(engine, owner), path=path)
     engine.execute("directories", "mode_set", mode=OWNER_MODE, path=path)
     return name
 
