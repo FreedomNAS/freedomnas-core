@@ -71,7 +71,8 @@ def grow_root_pool(engine) -> Dict[str, object]:
             return result
 
         logger.info("Growing %s (partition %s of %s) by %d bytes", device, part_num, disk, free)
-        engine.execute("zfs", "partition_grow", disk=disk, part_num=part_num, timeout=120)
+        engine.execute("zfs", "partition_grow", disk=disk, part_num=part_num, device=device,
+                       timeout=120)
         engine.execute("zfs", "pool_expand", pool_name=pool, device=device, timeout=120)
     except (CommandExecutionError, CommandTranslationError, ValueError) as exc:
         logger.error("Could not grow the root pool: %s", exc)

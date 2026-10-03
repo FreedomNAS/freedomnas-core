@@ -97,3 +97,12 @@ def test_the_pool_is_expanded_through_its_own_device_name():
     result = grow_root_pool(engine)
 
     assert result["grown"] and engine.kwargs["pool_expand"]["device"] == by_id
+
+
+def test_the_grown_partition_is_named_to_its_resize():
+    # partition_grow clears the label area at the partition's new end, where
+    # an older image's pool may have left its labels: it needs the device.
+    engine = FakeEngine(disk_size=PART_START + PART_SIZE + 100 * GIB)
+    grow_root_pool(engine)
+
+    assert engine.kwargs["partition_grow"]["device"] == "/dev/vda2"
