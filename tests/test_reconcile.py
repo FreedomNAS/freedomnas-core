@@ -26,12 +26,13 @@ class FakeEngine:
 
     def __init__(self, imported_pools=(), users=None, smb_shares=(), exports_file=None,
                  hostname="nas", timezone="UTC", values=None, failing=(),
-                 taken_uids=(), owners=None, groups=None, acltypes=""):
+                 taken_uids=(), owners=None, groups=None, acltypes="", services=()):
         self.imported_pools = list(imported_pools)
         self.taken_uids = {str(u) for u in taken_uids}
         self.owners = dict(owners or {})
         self.groups = dict(groups or {})
         self.acltypes = acltypes
+        self.services = list(services)
         self.users = dict(users or {})
         self.smb_shares = list(smb_shares)
         self.hostname = hostname
@@ -69,6 +70,8 @@ class FakeEngine:
             return self.groups.get(kwargs["path"], ""), ""
         if key == ("samba", "list_shares"):
             return "\n".join(self.smb_shares), ""
+        if key == ("services", "list_all"):
+            return "\n".join(self.services), ""
         return "", ""
 
     def get_profile_value(self, category, key):
@@ -90,6 +93,9 @@ class FakeConfig:
 
     def setup_pending(self):
         return self.pending
+
+    def get_service_boot(self):
+        return dict((self.state.get("services") or {}).get("boot") or {})
 
     def to_dict(self):
         return self.state
@@ -439,6 +445,41 @@ def test_service_enable_enables_then_starts():
     results = reconciler(engine)._do_service_enable("samba-cifs")
     assert [(r.action, r.params["service_name"]) for r in results] == [
         ("services.enable", "smbd"), ("services.start", "smbd")]
+
+
+def test_a_service_disabled_at_boot_is_not_turned_back_on_for_its_feature():
+    engine = FakeEngine(values={("samba", "smb_service"): "smbd"})
+    config = FakeConfig({"services": {"boot": {"smbd": False}}})
+    [result] = reconciler(engine, config)._do_service_enable("samba-cifs")
+    assert result.target_state == "skipped"
+    assert engine.actions() == []
+
+
+def test_the_boot_choices_of_the_webui_are_planned():
+    changes = diff({"services": {"boot": {"nfs-server": False, "agetty.tty1": True}}})
+    boot = [c for c in changes if c.path.startswith("services.boot.")]
+    assert [(c.new_value["name"], c.new_value["enabled"]) for c in boot] == [
+        ("nfs-server", False), ("agetty.tty1", True)]
+
+
+def test_a_service_disabled_at_boot_is_stopped_and_disabled():
+    engine = FakeEngine(services=["sshd", "nfs-server"])
+    results = reconciler(engine)._do_service_boot("nfs-server", False)
+    assert [(r.action, r.target_state) for r in results] == [
+        ("services.stop", "applied"), ("services.disable", "applied")]
+
+
+def test_a_service_enabled_at_boot_is_enabled_and_started():
+    engine = FakeEngine(services=["sshd", "nfs-server"])
+    results = reconciler(engine)._do_service_boot("nfs-server", True)
+    assert [r.action for r in results] == ["services.enable", "services.start"]
+
+
+def test_a_boot_choice_for_a_service_this_system_lacks_is_skipped():
+    engine = FakeEngine(services=["sshd"])
+    [result] = reconciler(engine)._do_service_boot("cronie", True)
+    assert result.target_state == "skipped"
+    assert ("services", "enable") not in engine.actions()
 
 
 def test_a_failed_action_is_reported_not_raised():

@@ -393,3 +393,18 @@ class TestConfigPathDiscovery:
         manager.clear_setup_pending()
         assert not marker.exists() and not manager.needs_setup()
         manager.clear_setup_pending()
+
+
+class TestServiceBoot:
+    def test_a_boot_choice_survives_a_reload(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        mgr = ConfigurationManager(config_path=str(path))
+        mgr.set_service_boot("agetty.tty1", False)
+        mgr.set_service_boot("nfs-server", True)
+        assert ConfigurationManager(config_path=str(path)).get_service_boot() == {
+            "agetty.tty1": False, "nfs-server": True}
+
+    def test_a_configuration_from_before_services_has_no_choices(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump({"system": {"hostname": "old"}}))
+        assert ConfigurationManager(config_path=str(path)).get_service_boot() == {}

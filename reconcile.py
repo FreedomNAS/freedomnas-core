@@ -316,6 +316,10 @@ class ReconciliationEngine:
             enabled = bool(ssh) and not self.config.setup_pending()
             changes.append(Change("system.ssh", None, enabled, "ensure"))
 
+        for name, enabled in ((desired.get("services") or {}).get("boot") or {}).items():
+            changes.append(Change(f"services.boot.{name}", None,
+                                  {"name": name, "enabled": bool(enabled)}, "ensure"))
+
         removals_allowed = mode == ReconcileMode.DECLARATIVE and self._names_an_admin(desired)
         if mode == ReconcileMode.DECLARATIVE and not removals_allowed:
             logger.warning("The configuration names no administrator: nothing will be removed")
@@ -426,6 +430,9 @@ class ReconciliationEngine:
 
             elif path.startswith("features."):
                 results.extend(self._do_service_enable(change.new_value["id"]))
+
+            elif path.startswith("services.boot."):
+                results.extend(self._do_service_boot(change.new_value["name"], change.new_value["enabled"]))
 
             if (path.startswith(("smb_shares.", "nfs_shares.")) and kind != "remove"
                     and change.new_value.get("owner") and change.new_value.get("path")
@@ -828,6 +835,24 @@ class ReconciliationEngine:
                 results.append(ActionResult(action=f"services.{action}", params=params, target_state="failed", error=str(exc)))
         return results
 
+    def _do_service_boot(self, name: str, enabled: bool) -> List[ActionResult]:
+        """Start a service at boot, or keep it from starting, as the WebUI chose."""
+        params = {"service_name": name}
+        listed = self._read("services", "list_all")
+        if listed is None or name not in listed.split():
+            return [ActionResult(action="services.boot", params=params, target_state="skipped",
+                                 error=f"no service {name} on this system")]
+        results: List[ActionResult] = []
+        for action in (("enable", "start") if enabled else ("stop", "disable")):
+            try:
+                self.engine.execute("services", action, service_name=name, check=enabled)
+                results.append(ActionResult(action=f"services.{action}", params=params, target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("Failed to %s service %s: %s", action, name, exc)
+                results.append(ActionResult(action=f"services.{action}", params=params,
+                                            target_state="failed", error=str(exc)))
+        return results
+
     def _do_service_enable(self, feature_id: str) -> List[ActionResult]:
         """Enable and start the service associated with a feature ID."""
         if feature_id not in _FEATURE_SERVICE_MAP:
@@ -847,6 +872,14 @@ class ReconciliationEngine:
                 params={"feature_id": feature_id},
                 target_state="skipped",
                 error=str(exc),
+            )]
+
+        if self.config.get_service_boot().get(service_name) is False:
+            return [ActionResult(
+                action=f"services.enable.{feature_id}",
+                params={"feature_id": feature_id, "service_name": service_name},
+                target_state="skipped",
+                error=f"{service_name} is disabled at boot",
             )]
 
         results: List[ActionResult] = []

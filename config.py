@@ -86,6 +86,9 @@ class ConfigurationManager:
             "enabled": False,
         },
         "installed_features": [],
+        "services": {
+            "boot": {},
+        },
     }
     
     def __init__(self, config_path: Optional[str] = None):
@@ -714,6 +717,18 @@ class ConfigurationManager:
             f for f in self.config.get("installed_features", [])
             if f.get("id") != feature_id
         ]
+        self.save()
+
+    def get_service_boot(self) -> Dict[str, bool]:
+        """Services whose start at boot was chosen in the WebUI, by name"""
+        return dict((self.config.get("services") or {}).get("boot") or {})
+
+    def set_service_boot(self, name: str, enabled: bool) -> None:
+        """Record whether a service starts at boot"""
+        services = self.config.setdefault("services", {})
+        boot = services.get("boot") or {}
+        boot[name] = bool(enabled)
+        services["boot"] = boot
         self.save()
 
     # Updates configuration methods
