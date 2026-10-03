@@ -25,8 +25,11 @@ class FakeEngine:
     """
 
     def __init__(self, imported_pools=(), users=None, smb_shares=(), exports_file=None,
-                 hostname="nas", timezone="UTC", values=None, failing=()):
+                 hostname="nas", timezone="UTC", values=None, failing=(),
+                 taken_uids=(), owners=None):
         self.imported_pools = list(imported_pools)
+        self.taken_uids = {str(u) for u in taken_uids}
+        self.owners = dict(owners or {})
         self.users = dict(users or {})
         self.smb_shares = list(smb_shares)
         self.hostname = hostname
@@ -54,7 +57,10 @@ class FakeEngine:
         if key == ("users", "list_groups"):
             return " ".join(self.users.get(kwargs["username"], [])), ""
         if key == ("users", "get_user_info"):
-            return (kwargs["username"] if kwargs["username"] in self.users else ""), ""
+            name = kwargs["username"]
+            return (name if name in self.users or name in self.taken_uids else ""), ""
+        if key == ("directories", "owner_uid_get"):
+            return self.owners.get(kwargs["path"], ""), ""
         if key == ("samba", "list_shares"):
             return "\n".join(self.smb_shares), ""
         return "", ""
@@ -145,7 +151,17 @@ def test_hostname_and_timezone_change_only_when_they_differ():
 def test_a_pool_is_imported_when_missing_and_never_removed():
     desired = {"storage": {"pools": [{"name": "tank"}]}}
     assert paths(diff(desired)) == [("storage.pools.tank", "add")]
-    assert diff(desired, {"storage": {"pools": [{"name": "tank"}, {"name": "old"}]}}) == []
+    assert paths(diff(desired, {"storage": {"pools": [{"name": "tank"}, {"name": "old"}]}})) == [
+        ("storage.pools.tank", "ensure")]
+
+
+def test_an_imported_pool_is_cached_and_mounted():
+    """firstboot leaves a restored data pool imported with -N and no cachefile."""
+    engine = FakeEngine()
+    results = reconciler(engine)._apply_changes(
+        [Change("storage.pools.tank", None, {"name": "tank"}, "ensure")])
+    assert action_names(results) == ["zfs.pool_cachefile_default", "zfs.mount_pool_auto"]
+    assert all(r.params == {"pool_name": "tank"} for r in results)
 
 
 def test_a_missing_user_is_added():
@@ -426,12 +442,15 @@ def test_a_failed_action_is_reported_not_raised():
     assert "hostname_set failed" in result.error
 
 
-def test_apply_routes_every_change_type():
-    engine = FakeEngine(values={("system", "ssh_service"): "sshd", ("samba", "smb_service"): "smbd"})
+def test_apply_routes_every_change_type(tmp_path):
+    engine = FakeEngine(values={("system", "ssh_service"): "sshd", ("samba", "smb_service"): "smbd",
+                                ("samba", "config_file"): str(tmp_path / "smb.conf"),
+                                ("samba", "usershare_path"): "/var/lib/samba/usershares"})
     changes = [
         Change("system.hostname", None, "nas", "add"),
         Change("system.timezone", None, "UTC", "add"),
         Change("storage.pools.tank", None, {"name": "tank"}, "add"),
+        Change("storage.pools.data", None, {"name": "data"}, "ensure"),
         Change("users.alice", None, {"username": "alice", "groups": []}, "add"),
         Change("features.samba-cifs", None, {"id": "samba-cifs", "enabled": True}, "ensure"),
         Change("system.ssh", None, False, "ensure"),
@@ -446,14 +465,75 @@ def test_apply_routes_every_change_type():
         "system.hostname_set",
         "system.timezone_set",
         "zfs.pool_import",
+        "zfs.pool_cachefile_default",
+        "zfs.mount_pool_auto",
         "users.create",
         "services.enable",
         "services.start",
         "services.stop",
         "services.disable",
         "samba.delete_share",
+        "samba.usershare_prepare",
         "samba.create_share",
         "nfs.export_remove",
         "nfs.export_add",
         "users.delete_keep_home",
     ]
+
+
+def test_usershares_are_prepared_once_before_the_first_share(tmp_path):
+    """A restored configuration's shares reach a system no wizard has prepared."""
+    smb_conf = tmp_path / "smb.conf"
+    smb_conf.write_text("[global]\n   workgroup = HOME\n")
+    engine = FakeEngine(values={("samba", "config_file"): str(smb_conf),
+                                ("samba", "usershare_path"): "/var/lib/samba/usershares",
+                                ("samba", "smb_service"): "smb"})
+    results = reconciler(engine)._apply_changes([
+        Change("smb_shares.a", None, {"name": "a", "path": "/tank/a"}, "ensure"),
+        Change("smb_shares.b", None, {"name": "b", "path": "/tank/b"}, "ensure"),
+    ])
+    assert action_names(results) == ["samba.usershare_prepare", "samba.create_share", "samba.create_share"]
+    assert "usershare path = /var/lib/samba/usershares" in smb_conf.read_text()
+
+
+def _created(engine):
+    return [(a, kw.get("username"), kw.get("uid")) for c, a, kw in engine.calls
+            if c == "users" and a.startswith("create")]
+
+
+def test_a_recorded_uid_is_kept():
+    engine = FakeEngine()
+    reconciler(engine)._apply_changes([Change("users.luca", None, {"username": "luca", "uid": 1003}, "add")])
+    assert _created(engine) == [("create_with_uid", "luca", "1003")]
+
+
+def test_without_a_recorded_uid_the_owned_share_tells_it():
+    """A configuration from before uids were recorded: the restored files carry the old ID."""
+    desired = {"users": [{"username": "luca"}, {"username": "anna"}, {"username": "mario"}],
+               "smb_shares": [{"name": "documenti", "path": "/tank/documenti", "owner": "luca"}],
+               "nfs_shares": [{"name": "foto", "path": "/tank/foto", "owner": "anna", "allowed_hosts": "*"}]}
+    engine = FakeEngine(owners={"/tank/documenti": "1003\n", "/tank/foto": "1004\n"},
+                        values={("nfs", "default_options"): "rw"})
+    rec = reconciler(engine)
+    changes = [c for c in rec.compute_diff(desired, {"system": {}, "storage": {"pools": []}, "users": [],
+                                                    "smb_shares": [], "nfs_shares": []})
+               if c.path.startswith("users.")]
+    rec._apply_changes(changes)
+    assert _created(engine) == [("create_with_uid", "luca", "1003"), ("create_with_uid", "anna", "1004"),
+                                ("create", "mario", "")]
+
+
+def test_a_root_owned_share_says_nothing_about_its_owner():
+    engine = FakeEngine(owners={"/tank/a": "0\n"})
+    rec = reconciler(engine)
+    rec._owned_paths = {"luca": ["/tank/a"]}
+    rec._apply_changes([Change("users.luca", None, {"username": "luca"}, "add")])
+    assert _created(engine) == [("create", "luca", "")]
+
+
+def test_a_uid_taken_here_is_not_reused():
+    engine = FakeEngine(taken_uids=[1003])
+    results = reconciler(engine)._apply_changes(
+        [Change("users.luca", None, {"username": "luca", "uid": 1003}, "add")])
+    assert _created(engine) == [("create", "luca", "")]
+    assert results[0].target_state == "applied"

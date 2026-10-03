@@ -28,6 +28,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager
     from freedomnas.datasets import nfs_export_options
+    from freedomnas import usershares
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -36,6 +37,7 @@ except ImportError:
     )
     from config import ConfigurationManager  # type: ignore[no-redef]
     from datasets import nfs_export_options  # type: ignore[no-redef]
+    import usershares  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
 
@@ -125,6 +127,9 @@ class ReconciliationEngine:
     def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager):
         self.engine = engine
         self.config = config
+        # owner -> the share paths given to them, from the last compute_diff:
+        # where a user's ID can be read back when the configuration has none.
+        self._owned_paths: Dict[str, List[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -266,10 +271,21 @@ class ReconciliationEngine:
             if want and want != have:
                 changes.append(Change(f"system.{key}", have, want, "modify" if have else "add"))
 
+        # A pool already imported is not necessarily in use: firstboot imports
+        # every pool with -N and no cachefile to look for .freedomnas, so a
+        # restored data pool is there with nothing mounted and would be left
+        # out again at the next boot. "ensure" mounts it and records it.
         imported = {p["name"] for p in current.get("storage", {}).get("pools") or []}
         for pool in desired.get("storage", {}).get("pools", []):
-            if pool.get("name") and pool["name"] not in imported:
-                changes.append(Change(f"storage.pools.{pool['name']}", None, pool, "add"))
+            if pool.get("name"):
+                kind = "ensure" if pool["name"] in imported else "add"
+                changes.append(Change(f"storage.pools.{pool['name']}", None, pool, kind))
+
+        self._owned_paths = {}
+        for share in desired.get("smb_shares", []) + desired.get("nfs_shares", []):
+            owner, path = share.get("owner"), share.get("path")
+            if owner and path and path not in self._owned_paths.setdefault(owner, []):
+                self._owned_paths[owner].append(path)
 
         observed_users = current.get("users")
         existing = {u["username"]: u for u in observed_users or []}
@@ -378,6 +394,7 @@ class ReconciliationEngine:
 
     def _apply_changes(self, changes: List[Change]) -> List[ActionResult]:
         results: List[ActionResult] = []
+        usershares_ready = False
         for change in changes:
             path, kind = change.path, change.change_type
 
@@ -391,7 +408,10 @@ class ReconciliationEngine:
                 results.extend(self._do_ssh(change.new_value))
 
             elif path.startswith("storage.pools."):
-                results.append(self._do_pool_import(change.new_value))
+                if kind == "ensure":
+                    results.extend(self._do_pool_adopt(change.new_value))
+                else:
+                    results.append(self._do_pool_import(change.new_value))
 
             elif path.startswith("users."):
                 if kind in ("add", "ensure"):
@@ -408,6 +428,9 @@ class ReconciliationEngine:
                 if kind == "remove":
                     results.append(self._do_smb_share_delete(path.split(".", 1)[1]))
                 else:
+                    if not usershares_ready:
+                        results.append(self._do_usershares_prepare())
+                        usershares_ready = True
                     results.append(self._do_smb_share_create(change.new_value))
 
             elif path.startswith("nfs_shares."):
@@ -457,6 +480,23 @@ class ReconciliationEngine:
             logger.error("Failed to import pool %s: %s", pool_name, exc)
             return ActionResult(action="zfs.pool_import", params=params, target_state="failed", error=str(exc))
 
+    def _do_pool_adopt(self, pool: dict) -> List[ActionResult]:
+        """
+        An imported pool in use: in the default cachefile, so the system's
+        own import at boot brings it back mounted, and its datasets mounted.
+        """
+        pool_name = pool.get("name", "")
+        params = {"pool_name": pool_name}
+        results = []
+        for action in ("pool_cachefile_default", "mount_pool_auto"):
+            try:
+                self.engine.execute("zfs", action, pool_name=pool_name, timeout=300)
+                results.append(ActionResult(action=f"zfs.{action}", params=params, target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("%s failed for pool %s: %s", action, pool_name, exc)
+                results.append(ActionResult(action=f"zfs.{action}", params=params, target_state="failed", error=str(exc)))
+        return results
+
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: users
     # ------------------------------------------------------------------
@@ -470,6 +510,24 @@ class ReconciliationEngine:
             return False
         return bool(stdout.strip())
 
+    def _uid_from_data(self, username: str) -> Optional[str]:
+        """
+        The ID a user's files carry, for a configuration that records none:
+        a share given to its owner is that owner's directory, and a restored
+        pool brings it with the old system's ID. Recreated under a new ID the
+        user would lose those files, and whoever got the old one gain them.
+        Pools are mounted before users are created.
+        """
+        for path in self._owned_paths.get(username, []):
+            try:
+                stdout, _ = self.engine.execute("directories", "owner_uid_get", path=path, check=False)
+            except (CommandExecutionError, CommandTranslationError):
+                continue
+            uid = stdout.strip()
+            if uid.isdigit() and uid != "0":
+                return uid
+        return None
+
     def _do_user_create(self, user: dict) -> ActionResult:
         username = user.get("username", "")
         groups = ",".join(user.get("groups", []))
@@ -479,16 +537,23 @@ class ReconciliationEngine:
                 action="users.create", params=params,
                 target_state="skipped", error="user already exists",
             )
+        uid = str(user.get("uid") or self._uid_from_data(username) or "")
+        if uid and self._user_exists(uid):
+            logger.warning("uid %s of %s is taken here: created with a new one, "
+                           "its files keep the old owner", uid, username)
+            uid = ""
+        if uid:
+            params["uid"] = uid
         try:
             self.engine.execute(
-                "users", "create",
+                "users", "create_with_uid" if uid else "create",
                 username=username,
                 groups=groups,
-                uid=user.get("uid", ""),
+                uid=uid,
                 gid=user.get("gid", ""),
                 shell=user.get("shell", "/bin/bash"),
             )
-            logger.info("Created user: %s", username)
+            logger.info("Created user: %s%s", username, f" (uid {uid})" if uid else "")
             return ActionResult(action="users.create", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to create user %s: %s", username, exc)
@@ -556,6 +621,15 @@ class ReconciliationEngine:
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: SMB shares
     # ------------------------------------------------------------------
+
+    def _do_usershares_prepare(self) -> ActionResult:
+        """A restored configuration's shares reach a system no wizard has prepared."""
+        try:
+            usershares.prepare(self.engine)
+            return ActionResult(action="samba.usershare_prepare", params={}, target_state="applied")
+        except (CommandExecutionError, CommandTranslationError, OSError) as exc:
+            logger.error("Could not prepare Samba usershares: %s", exc)
+            return ActionResult(action="samba.usershare_prepare", params={}, target_state="failed", error=str(exc))
 
     def _do_smb_share_create(self, share: dict) -> ActionResult:
         """
