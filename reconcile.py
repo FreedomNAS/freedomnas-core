@@ -413,6 +413,8 @@ class ReconciliationEngine:
                     results.extend(self._do_pool_adopt(change.new_value))
                 else:
                     results.append(self._do_pool_import(change.new_value))
+                if results[-1].target_state == "applied":
+                    results.extend(self._do_pool_acltype(change.new_value))
 
             elif path.startswith("users."):
                 if kind in ("add", "ensure"):
@@ -502,6 +504,41 @@ class ReconciliationEngine:
             except (CommandExecutionError, CommandTranslationError) as exc:
                 logger.error("%s failed for pool %s: %s", action, pool_name, exc)
                 results.append(ActionResult(action=f"zfs.{action}", params=params, target_state="failed", error=str(exc)))
+        return results
+
+    def _do_pool_acltype(self, pool: dict) -> List[ActionResult]:
+        """
+        The edition's ACL type on a pool's datasets: FreeBSD's ZFS speaks
+        NFSv4 ACLs, Linux's POSIX ones, and a pool restored from the other
+        edition keeps the type it was created with, which this one ignores.
+        Only the property changes, not a file: the pool's root dataset and
+        any dataset set apart locally get it, the rest inherit it. The
+        ACLs FreedomNAS writes are the trivial ones the file mode already
+        says, so the mode carries them across.
+        """
+        pool_name = pool.get("name", "")
+        try:
+            want = self.engine.get_profile_value("zfs", "pool_acltype")
+            stdout, _ = self.engine.execute("zfs", "acltype_list", pool_name=pool_name, check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            return []
+        results = []
+        for line in stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) < 3:
+                continue
+            name, value, source = fields[0], fields[1], fields[2]
+            if value == want or (name != pool_name and source != "local"):
+                continue
+            params = {"dataset": name, "acltype": want}
+            try:
+                self.engine.execute("zfs", "dataset_set", property="acltype", value=want, dataset=name)
+                logger.info("acltype of %s: %s -> %s", name, value, want)
+                results.append(ActionResult(action="zfs.dataset_set", params=params, target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("Could not set acltype=%s on %s: %s", want, name, exc)
+                results.append(ActionResult(action="zfs.dataset_set", params=params,
+                                            target_state="failed", error=str(exc)))
         return results
 
     # ------------------------------------------------------------------

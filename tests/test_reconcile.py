@@ -26,11 +26,12 @@ class FakeEngine:
 
     def __init__(self, imported_pools=(), users=None, smb_shares=(), exports_file=None,
                  hostname="nas", timezone="UTC", values=None, failing=(),
-                 taken_uids=(), owners=None, groups=None):
+                 taken_uids=(), owners=None, groups=None, acltypes=""):
         self.imported_pools = list(imported_pools)
         self.taken_uids = {str(u) for u in taken_uids}
         self.owners = dict(owners or {})
         self.groups = dict(groups or {})
+        self.acltypes = acltypes
         self.users = dict(users or {})
         self.smb_shares = list(smb_shares)
         self.hostname = hostname
@@ -62,6 +63,8 @@ class FakeEngine:
             return (name if name in self.users or name in self.taken_uids else ""), ""
         if key == ("directories", "owner_uid_get"):
             return self.owners.get(kwargs["path"], ""), ""
+        if key == ("zfs", "acltype_list"):
+            return self.acltypes, ""
         if key == ("directories", "group_get"):
             return self.groups.get(kwargs["path"], ""), ""
         if key == ("samba", "list_shares"):
@@ -572,3 +575,33 @@ def test_on_freebsd_the_group_is_wheel(tmp_path):
     reconciler(engine)._apply_changes([
         Change("smb_shares.documenti", None, {"name": "documenti", "path": "/tank/documenti", "owner": "luca"}, "ensure")])
     assert _regrouped(engine) == [("/tank/documenti", "wheel")]
+
+
+def _acl_sets(engine):
+    return [(kw["dataset"], kw["value"]) for c, a, kw in engine.calls
+            if a == "dataset_set" and kw.get("property") == "acltype"]
+
+
+def test_a_pool_from_freebsd_gets_posix_acls_on_linux():
+    """Only the root and what is set locally change; inherited datasets follow."""
+    engine = FakeEngine(values={("zfs", "pool_acltype"): "posix"}, acltypes=(
+        "tank\tnfsv4\tlocal\n"
+        "tank/documenti\tnfsv4\tinherited from tank\n"
+        "tank/foto\tnfsv4\tlocal\n"
+        "tank/media\tposix\tlocal\n"))
+    reconciler(engine)._apply_changes([Change("storage.pools.tank", None, {"name": "tank"}, "ensure")])
+    assert _acl_sets(engine) == [("tank", "posix"), ("tank/foto", "posix")]
+
+
+def test_a_pool_already_right_is_left_alone():
+    engine = FakeEngine(values={("zfs", "pool_acltype"): "nfsv4"},
+                        acltypes="tank\tnfsv4\tlocal\ntank/a\tnfsv4\tinherited from tank\n")
+    reconciler(engine)._apply_changes([Change("storage.pools.tank", None, {"name": "tank"}, "add")])
+    assert _acl_sets(engine) == []
+
+
+def test_a_pool_that_failed_to_import_is_not_touched():
+    engine = FakeEngine(values={("zfs", "pool_acltype"): "posix"}, failing={("zfs", "pool_import")},
+                        acltypes="tank\tnfsv4\tlocal\n")
+    reconciler(engine)._apply_changes([Change("storage.pools.tank", None, {"name": "tank"}, "add")])
+    assert _acl_sets(engine) == []
