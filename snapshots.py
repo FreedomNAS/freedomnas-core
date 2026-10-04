@@ -12,6 +12,7 @@ by a retention count someone lowered.
 """
 
 import logging
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -111,3 +112,110 @@ class SnapshotScheduler:
             logger.info("Pruned %s", full_name)
             destroyed.append(full_name)
         return destroyed
+
+
+# ---------------------------------------------------------------------------
+# Snapshots by hand: names, listings, holds, changes
+# ---------------------------------------------------------------------------
+
+_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]*$")
+
+
+def split_name(full: str) -> tuple:
+    """`pool/ds@snap` -> (`pool/ds`, `snap`). Raises ValueError for anything else."""
+    if not isinstance(full, str) or full.count("@") != 1 or len(full) > 255:
+        raise ValueError(f"{full!r} is not a snapshot name (dataset@name)")
+    dataset, snap = full.split("@")
+    if not dataset or not all(_PART.match(p) for p in dataset.split("/")) or not _PART.match(snap):
+        raise ValueError(f"{full!r} is not a snapshot name (dataset@name)")
+    return dataset, snap
+
+
+def check_part(name: str, what: str = "snapshot") -> str:
+    if not isinstance(name, str) or not _PART.match(name) or len(name) > 200:
+        raise ValueError(f"A {what} name starts with a letter or digit and holds letters, digits, _ . : -")
+    return name
+
+
+def check_tag(tag: str) -> str:
+    if not isinstance(tag, str) or not _TAG.match(tag) or len(tag) > 200:
+        raise ValueError("A hold tag starts with a letter or digit and holds letters, digits, _ . : + -")
+    return tag
+
+
+def _int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_list(text: str) -> List[Dict]:
+    """`zfs list -t snapshot -Hp -o name,creation,used,referenced,userrefs,clones`."""
+    found = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or "@" not in parts[0]:
+            continue
+        dataset, snap = parts[0].split("@", 1)
+        entry = {"name": parts[0], "dataset": dataset, "snapshot": snap,
+                 "creation": _int(parts[1]) if _int(parts[1]) is not None else parts[1],
+                 "used": _int(parts[2]) if _int(parts[2]) is not None else parts[2]}
+        if len(parts) >= 6:
+            entry["referenced"] = _int(parts[3])
+            entry["holds"] = _int(parts[4]) or 0
+            entry["clones"] = [c for c in parts[5].split(",") if c and c != "-"]
+        found.append(entry)
+    return found
+
+
+def parse_bookmarks(text: str) -> List[Dict]:
+    found = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and "#" in parts[0]:
+            dataset, mark = parts[0].split("#", 1)
+            found.append({"name": parts[0], "dataset": dataset, "bookmark": mark,
+                          "creation": _int(parts[1])})
+    return found
+
+
+def parse_holds(text: str) -> List[Dict]:
+    found = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            found.append({"tag": parts[1], "time": _int(parts[2])})
+    return found
+
+
+DIFF_CHANGES = {"-": "removed", "+": "created", "M": "modified", "R": "renamed"}
+DIFF_TYPES = {"F": "file", "/": "directory", "@": "symlink", "|": "pipe", "=": "socket",
+              "B": "block device", "C": "character device", ">": "door", "P": "event port"}
+
+
+def _unescape(path: str) -> str:
+    raw = re.sub(r"\\0*([0-7]{3})", lambda m: chr(int(m.group(1), 8)), path)
+    try:
+        return raw.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return raw
+
+
+def parse_diff(text: str, limit: int = 5000) -> Dict:
+    """`zfs diff -FHt`: what changed between a snapshot and a later one or the live dataset."""
+    changes, total = [], 0
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        total += 1
+        if len(changes) >= limit:
+            continue
+        entry = {"change": DIFF_CHANGES.get(parts[1], parts[1]),
+                 "type": DIFF_TYPES.get(parts[2], parts[2]), "path": _unescape(parts[3])}
+        if len(parts) >= 5:
+            entry["new_path"] = _unescape(parts[4])
+        changes.append(entry)
+    return {"changes": changes, "total": total, "truncated": total > len(changes)}

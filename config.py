@@ -560,6 +560,31 @@ class ConfigurationManager:
         self.config["snapshots"]["root"].append(snapshot_record)
         self.save()
     
+    def remove_root_snapshot(self, snapshot_name: str, recursive: bool = False) -> None:
+        """Forget a recorded snapshot, and with `recursive` those of its descendants."""
+        dataset, _, snap = snapshot_name.partition("@")
+        records = self.config.get("snapshots", {}).get("root", [])
+
+        def gone(name: str) -> bool:
+            if name == snapshot_name:
+                return True
+            return recursive and name.startswith(dataset + "/") and name.endswith("@" + snap)
+
+        kept = [r for r in records if not gone(str(r.get("name", "")))]
+        if len(kept) != len(records):
+            self.config["snapshots"]["root"] = kept
+            self.save()
+
+    def rename_root_snapshot(self, old: str, new: str) -> None:
+        records = self.config.get("snapshots", {}).get("root", [])
+        changed = False
+        for r in records:
+            if r.get("name") == old:
+                r["name"] = new
+                changed = True
+        if changed:
+            self.save()
+
     def get_root_snapshots(self) -> List[Dict[str, Any]]:
         """Get all root filesystem snapshots"""
         return self.config.get("snapshots", {}).get("root", [])

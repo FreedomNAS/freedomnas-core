@@ -408,3 +408,17 @@ class TestServiceBoot:
         path = tmp_path / "config.yaml"
         path.write_text(yaml.safe_dump({"system": {"hostname": "old"}}))
         assert ConfigurationManager(config_path=str(path)).get_service_boot() == {}
+
+
+def test_remove_and_rename_root_snapshots(tmp_path):
+    from config import ConfigurationManager
+    cfg = ConfigurationManager(str(tmp_path / "config.yaml"))
+    for name in ("tank/a@s1", "tank/a/b@s1", "tank/a@s2"):
+        cfg.add_root_snapshot(name)
+    cfg.remove_root_snapshot("tank/a@s1")
+    assert [r["name"] for r in cfg.get_root_snapshots()] == ["tank/a/b@s1", "tank/a@s2"]
+    cfg.add_root_snapshot("tank/a@s1")
+    cfg.remove_root_snapshot("tank/a@s1", recursive=True)
+    assert [r["name"] for r in cfg.get_root_snapshots()] == ["tank/a@s2"]
+    cfg.rename_root_snapshot("tank/a@s2", "tank/a@kept")
+    assert [r["name"] for r in cfg.get_root_snapshots()] == ["tank/a@kept"]

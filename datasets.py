@@ -328,3 +328,92 @@ def nfs_export_options(engine, share: dict) -> str:
         raise CommandExecutionError(f"Cannot read the user and group ID of {owner}")
     template = engine.get_profile_value("nfs", "owner_options")
     return options + template.format(owner=owner, uid=fields[2], gid=fields[3])
+
+
+# ---------------------------------------------------------------------------
+# Volumes, protection checks, quotas
+# ---------------------------------------------------------------------------
+
+_SIZE = re.compile(r"^\d+(\.\d+)?[KMGTP]?$", re.IGNORECASE)
+VOLBLOCKSIZES = ("4K", "8K", "16K", "32K", "64K", "128K")
+
+
+def create_volume(engine, parent: str, name: str, size: str, sparse: bool = False,
+                  blocksize: str = "", properties: Optional[Dict[str, str]] = None) -> str:
+    """Create the volume parent/name of `size`; `properties` already validated."""
+    full = f"{parent}/{name}"
+    if "/" in name:
+        raise DatasetProblem("The name is one part: choose the dataset it goes in as its parent")
+    reason = protected_reason(full, root_pool(engine))
+    if reason:
+        raise DatasetProblem(f"{full} cannot be created here: {reason}")
+    _check_name(full)
+    if not _SIZE.match(size or ""):
+        raise DatasetProblem("A volume size is a number with K, M, G, T or P, such as 20G")
+    if blocksize and blocksize not in VOLBLOCKSIZES:
+        raise DatasetProblem(f"The block size is one of {', '.join(VOLBLOCKSIZES)}")
+    if not exists(engine, parent):
+        raise DatasetProblem(f"{parent} does not exist")
+    if exists(engine, full):
+        raise DatasetProblem(f"{full} already exists")
+    options = [f"{k}={v}" for k, v in (properties or {}).items()]
+    if blocksize:
+        options.append(f"volblocksize={blocksize}")
+    if any(c.isspace() for o in options for c in o):
+        raise DatasetProblem("Property values may not contain spaces")
+    engine.execute("zfs", "volume_create_sparse" if sparse else "volume_create",
+                   size=size, options=" ".join(f"-o {o}" for o in options),
+                   dataset=full, timeout=120)
+    return full
+
+
+def change_problem(engine, name: str) -> Optional[str]:
+    """Why `name` itself must not be rolled back, unmounted or promoted, or None."""
+    rows = listing(engine)
+    mountpoint = next((mp for ds, mp in rows if ds == name), "")
+    return protected_reason(name, root_pool(engine), mountpoint)
+
+
+_PRINCIPAL = re.compile(r"^[A-Za-z0-9_.$][A-Za-z0-9_.$@-]*$")
+QUOTA_KINDS = ("user", "group")
+
+
+def quota_property(kind: str, who: str, objects: bool = False) -> str:
+    if kind not in QUOTA_KINDS:
+        raise DatasetProblem("A quota is for a user or a group")
+    if not _PRINCIPAL.match(who or "") or len(who) > 64:
+        raise DatasetProblem(f"{who!r} is not a user or group name")
+    return f"{kind}{'obj' if objects else ''}quota@{who}"
+
+
+def parse_space(text: str) -> List[Dict]:
+    """`zfs userspace|groupspace -Hp -o type,name,used,quota,objused,objquota`."""
+    def num(v):
+        return int(v) if v.isdigit() else None
+    found = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 6:
+            found.append({"type": parts[0], "name": parts[1], "used": num(parts[2]),
+                          "quota": num(parts[3]), "objused": num(parts[4]),
+                          "objquota": num(parts[5])})
+    return found
+
+
+def clone_problem(engine, dataset: str, target: str) -> Optional[str]:
+    """Why a snapshot of `dataset` cannot be cloned to `target`, or None."""
+    try:
+        _check_name(target)
+    except DatasetProblem as exc:
+        return str(exc)
+    if target.split("/")[0] != dataset.split("/")[0]:
+        return "A clone lives in the same pool as its snapshot"
+    reason = protected_reason(target, root_pool(engine))
+    if reason:
+        return f"{target} cannot be created here: {reason}"
+    parent = target.rsplit("/", 1)[0]
+    if not exists(engine, parent):
+        return f"{parent} does not exist"
+    if exists(engine, target):
+        return f"{target} already exists"
+    return None
