@@ -792,3 +792,37 @@ def test_a_missing_wireguard_is_set_up_again():
     [result] = reconciler(engine)._do_network([entry])
     assert (result.action, result.target_state) == ("network.wireguard", "applied")
     assert [a for _, a, _ in engine.calls if a.startswith("wg_")] == ["wg_exists", "wg_write", "wg_apply"]
+
+
+def test_smb_shares_wait_for_smbd_and_start_it(monkeypatch):
+    import reconcile
+    monkeypatch.setattr(reconcile.time, "sleep", lambda s: None)
+    engine = FakeEngine(values={("samba", "smb_service"): "samba_server"})
+    tries = {"n": 0}
+    plain = engine.execute
+
+    def execute(category, action, **kwargs):
+        if (category, action) == ("samba", "create_share"):
+            engine.calls.append((category, action, kwargs))
+            tries["n"] += 1
+            if tries["n"] < 3:
+                raise CommandExecutionError("net usershare add: ... refused. Maybe smbd is not running.")
+            return "", ""
+        return plain(category, action, **kwargs)
+
+    engine.execute = execute
+    monkeypatch.setattr(reconcile.usershares, "prepare", lambda e: None)
+    r = reconciler(engine)
+    assert r._do_usershares_prepare().target_state == "applied"
+    assert ("services", "start", {"timeout": 60, "service_name": "samba_server"}) in engine.calls
+    assert r._do_smb_share_create({"name": "docs", "path": "/tank/docs", "valid_users": ["luca"]}).target_state == "applied"
+    assert tries["n"] == 3
+
+
+def test_other_smb_errors_are_not_retried(monkeypatch):
+    import reconcile
+    monkeypatch.setattr(reconcile.time, "sleep", lambda s: None)
+    engine = FakeEngine(failing={("samba", "create_share")})
+    result = reconciler(engine)._do_smb_share_create({"name": "docs", "path": "/tank/docs"})
+    assert result.target_state == "failed"
+    assert [a for _, a, _ in engine.calls].count("create_share") == 1

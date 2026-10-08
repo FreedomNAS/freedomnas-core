@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import yaml
 from dataclasses import dataclass
 from enum import Enum
@@ -78,6 +79,9 @@ class ActionResult:
 
 # Maps abstract feature IDs to (profile_category, service_name_key).
 # The actual service name is read from the OS profile at runtime — never hardcoded.
+SMBD_WAIT_ATTEMPTS = 10
+SMBD_WAIT_SECONDS = 3
+
 _FEATURE_SERVICE_MAP: Dict[str, tuple] = {
     "samba-cifs": ("samba", "smb_service"),
     "nfs":        ("nfs",   "nfs_service"),
@@ -831,9 +835,17 @@ class ReconciliationEngine:
                                  target_state="failed", error=str(exc))]
 
     def _do_usershares_prepare(self) -> ActionResult:
-        """A restored configuration's shares reach a system no wizard has prepared."""
+        """
+        A restored configuration's shares reach a system no wizard has
+        prepared, and `net usershare add` needs a running smbd to turn user
+        names into SIDs: at boot the reconciler can be ahead of it.
+        """
         try:
             usershares.prepare(self.engine)
+            service = self.engine.get_profile_value("samba", "smb_service")
+            stdout, _ = self.engine.execute("services", "is_running", check=False, service_name=service)
+            if stdout.strip() != "yes":
+                self.engine.execute("services", "start", timeout=60, service_name=service)
             return ActionResult(action="samba.usershare_prepare", params={}, target_state="applied")
         except (CommandExecutionError, CommandTranslationError, OSError) as exc:
             logger.error("Could not prepare Samba usershares: %s", exc)
@@ -851,13 +863,20 @@ class ReconciliationEngine:
         acl = share.get("acl") or self._default_smb_acl(share)
         params = {"share_name": name, "path": path}
         try:
-            self.engine.execute(
-                "samba", "create_share",
-                share_name=name,
-                path=path,
-                comment=comment,
-                acl=acl,
-            )
+            for attempt in range(SMBD_WAIT_ATTEMPTS):
+                try:
+                    self.engine.execute(
+                        "samba", "create_share",
+                        share_name=name,
+                        path=path,
+                        comment=comment,
+                        acl=acl,
+                    )
+                    break
+                except CommandExecutionError as exc:
+                    if "smbd is not running" not in str(exc) or attempt == SMBD_WAIT_ATTEMPTS - 1:
+                        raise
+                    time.sleep(SMBD_WAIT_SECONDS)
             logger.info("SMB share %s → %s", name, path)
             return ActionResult(action="samba.create_share", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
