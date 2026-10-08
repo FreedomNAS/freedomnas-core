@@ -24,13 +24,15 @@ def _natural(name: str):
 def parse_physical(text: str) -> List[Dict[str, str]]:
     """`network.list_physical`: one card per line, "name mac driver"."""
     cards = []
+    seen = set()
     for line in (text or "").splitlines():
         fields = line.split()
         if len(fields) < 2:
             continue
         mac = fields[1].lower()
-        if not _MAC.match(mac) or mac == "00:00:00:00:00:00":
+        if not _MAC.match(mac) or mac == "00:00:00:00:00:00" or mac in seen:
             continue
+        seen.add(mac)
         name = fields[0]
         cards.append({"name": name, "mac": mac, "driver": fields[2] if len(fields) > 2 else name})
     return sorted(cards, key=lambda c: _natural(c["name"]))

@@ -782,3 +782,13 @@ def test_a_bridge_whose_port_is_missing_is_skipped():
     engine = _with_links(FakeEngine(), '[{"ifname": "fnas_lan2"}]')
     [result] = reconciler(engine)._do_network([BRIDGE])
     assert result.target_state == "skipped" and "fnas_lan1" in result.error
+
+
+def test_a_missing_wireguard_is_set_up_again():
+    import wireguard
+    entry = wireguard.new_server({"endpoint": "nas.example.org"}, [])
+    engine = FakeEngine()
+    engine.execute_with_stdin = lambda c, a, data, **k: (engine.calls.append((c, a, k)) or ("", ""))
+    [result] = reconciler(engine)._do_network([entry])
+    assert (result.action, result.target_state) == ("network.wireguard", "applied")
+    assert [a for _, a, _ in engine.calls if a.startswith("wg_")] == ["wg_exists", "wg_write", "wg_apply"]

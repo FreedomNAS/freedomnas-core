@@ -18,6 +18,7 @@ def cards(*pairs):
 def test_parse_physical_skips_what_is_not_a_card():
     text = ("eth1 52:54:00:00:00:0B eth1\n"
             "eth0 52:54:00:00:00:0a vtnet0\ndummy 00:00:00:00:00:00 dummy\nbroken\n"
+            "zz9 52:54:00:00:00:0b zz9\n"
             "fnas_lan2 52:54:00:00:00:0c fnas_lan2\n")
     assert netnames.parse_physical(text) == [
         {"name": "eth0", "mac": A, "driver": "vtnet0"},

@@ -29,7 +29,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager
     from freedomnas.datasets import nfs_export_options, owner_group
-    from freedomnas import netconfig, netnames, usershares
+    from freedomnas import netconfig, netnames, usershares, wireguard
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -40,6 +40,7 @@ except ImportError:
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
     import netnames  # type: ignore[no-redef]
+    import wireguard  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -290,7 +291,8 @@ class ReconciliationEngine:
 
         if current.get("network", {}).get("links"):
             wanted = [i for i in (desired.get("network") or {}).get("interfaces") or []
-                      if i.get("logical_name") and (i.get("config") or i.get("type") in netconfig.VIRTUAL_TYPES)]
+                      if i.get("logical_name") and (i.get("config") or i.get("type") in netconfig.VIRTUAL_TYPES
+                                                    or i.get("type") == "wireguard")]
             changes.append(Change("network.interfaces", None, wanted, "ensure"))
 
         # A pool already imported is not necessarily in use: firstboot imports
@@ -511,8 +513,11 @@ class ReconciliationEngine:
         except (CommandExecutionError, CommandTranslationError):
             pass
         links = self._observe_links() or []
-        order = {"bond": 1, "vlan": 2, "bridge": 3}
+        order = {"bond": 1, "vlan": 2, "bridge": 3, "wireguard": 4}
         for entry in sorted(interfaces, key=lambda e: order.get(e.get("type"), 0)):
+            if entry.get("type") == "wireguard":
+                results.append(self._do_wireguard(entry))
+                continue
             if entry.get("type") in netconfig.VIRTUAL_TYPES:
                 results.append(self._do_virtual(entry, links))
                 continue
@@ -526,6 +531,21 @@ class ReconciliationEngine:
                 continue
             results.append(self._do_interface(name, entry["config"], name in renamed.values()))
         return results
+
+    def _do_wireguard(self, entry: dict) -> ActionResult:
+        params = {"interface": entry["logical_name"], "type": "wireguard"}
+        try:
+            stdout, _ = self.engine.execute("network", "wg_exists", check=False,
+                                            interface=entry["logical_name"])
+            if stdout.strip() == "yes":
+                return ActionResult(action="network.wireguard", params=params, target_state="skipped",
+                                    error="already configured")
+            wireguard.apply(self.engine, entry)
+        except (CommandExecutionError, CommandTranslationError, wireguard.WireGuardProblem, KeyError) as exc:
+            logger.error("Failed to set up WireGuard: %s", exc)
+            return ActionResult(action="network.wireguard", params=params, target_state="failed",
+                                error=str(exc))
+        return ActionResult(action="network.wireguard", params=params, target_state="applied")
 
     def _do_virtual(self, entry: dict, links: List[str]) -> ActionResult:
         name = entry["logical_name"]
