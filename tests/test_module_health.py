@@ -39,10 +39,18 @@ class FakeEngine:
 
 
 class FakeConfig:
-    def __init__(self, users=(), features=(), topgrade=False):
+    def __init__(self, users=(), features=(), topgrade=False, smb=(), nfs=()):
         self.users = [{"username": u} for u in users]
         self.features = list(features)
         self.topgrade = topgrade
+        self.smb = [{"name": n} for n in smb]
+        self.nfs = [{"path": p} for p in nfs]
+
+    def get_smb_shares(self):
+        return self.smb
+
+    def get_nfs_shares(self):
+        return self.nfs
 
     def get_users(self):
         return self.users
@@ -101,11 +109,18 @@ def test_shares_names_the_service_that_stopped():
         {("samba", "smb_service"): "smbd", ("nfs", "nfs_service"): "nfs-server"},
     )
     config = FakeConfig(features=[{"id": "samba-cifs", "enabled": True}, {"id": "nfs", "enabled": True}])
-    assert module("shares", "SharesModule", engine, config).health() == (False, "nfs-server not running")
+    assert module("shares", "SharesModule", engine, config).health() == (False, "no shares, nfs-server not running")
 
 
 def test_shares_without_share_features_is_healthy():
-    assert module("shares", "SharesModule", FakeEngine()).health() == (True, "no share services enabled")
+    assert module("shares", "SharesModule", FakeEngine()).health() == (True, "no shares, no share services enabled")
+
+
+def test_shares_restored_without_features_are_seen_and_their_services_checked():
+    engine = FakeEngine({}, {("samba", "smb_service"): "smbd", ("nfs", "nfs_service"): "nfs-server"})
+    config = FakeConfig(smb=["documenti", "foto"], nfs=["/tank/documenti"])
+    assert module("shares", "SharesModule", engine, config).health() == (
+        True, "2 SMB, 1 NFS shares, smbd, nfs-server running")
 
 
 def test_users_names_the_account_that_is_missing():

@@ -22,6 +22,11 @@ except ImportError:
 
 logger = logging.getLogger("FreedomNAS.Module.Shares")
 
+_FEATURES = {
+    "samba-cifs": ("samba", "smb_service"),
+    "nfs": ("nfs", "nfs_service"),
+}
+
 
 class SharesModule(FreedomNASModule):
     """Monitors SMB and NFS service health based on installed features."""
@@ -34,25 +39,33 @@ class SharesModule(FreedomNASModule):
     def name(self) -> str:
         return "shares"
 
-    def start(self) -> None:
-        """Resolve service names from profile for each enabled feature."""
-        self._active_services = []
-        feature_map = {
-            "samba-cifs": ("samba", "smb_service"),
-            "nfs":        ("nfs",   "nfs_service"),
-        }
+    def _services(self) -> List[str]:
+        """
+        The services of the enabled share features, and of every kind of
+        share the configuration holds: a restored or imaged system has shares
+        but may record no installed features.
+        """
+        wanted = []
         for feature in self._config.get_installed_features():
-            if not feature.get("enabled"):
+            if feature.get("enabled") and feature.get("id") in _FEATURES:
+                wanted.append(_FEATURES[feature["id"]])
+        if self._config.get_smb_shares():
+            wanted.append(_FEATURES["samba-cifs"])
+        if self._config.get_nfs_shares():
+            wanted.append(_FEATURES["nfs"])
+        services: List[str] = []
+        for category, key in wanted:
+            try:
+                svc = self._engine.get_profile_value(category, key)
+            except CommandTranslationError:
+                logger.warning("SharesModule: no profile value for %s.%s", category, key)
                 continue
-            fid = feature.get("id", "")
-            if fid in feature_map:
-                category, key = feature_map[fid]
-                try:
-                    svc = self._engine.get_profile_value(category, key)
-                    self._active_services.append(svc)
-                except CommandTranslationError:
-                    logger.warning("SharesModule: no profile value for %s.%s", category, key)
+            if svc not in services:
+                services.append(svc)
+        return services
 
+    def start(self) -> None:
+        self._active_services = self._services()
         logger.info(
             "SharesModule started — monitoring services: %s",
             self._active_services or "(none)",
@@ -63,9 +76,13 @@ class SharesModule(FreedomNASModule):
         logger.info("SharesModule stopped")
 
     def health(self) -> Tuple[bool, str]:
-        """Every service of an enabled share feature answers `services.status`."""
+        """Every service the shares need answers `services.status`."""
+        self._active_services = self._services()
+        counts = [f"{n} {kind}" for n, kind in ((len(self._config.get_smb_shares()), "SMB"),
+                                                 (len(self._config.get_nfs_shares()), "NFS")) if n]
+        shares = (", ".join(counts) + " shares") if counts else "no shares"
         if not self._active_services:
-            return True, "no share services enabled"
+            return True, f"{shares}, no share services enabled"
 
         stopped = []
         for service_name in self._active_services:
@@ -81,8 +98,8 @@ class SharesModule(FreedomNASModule):
                     "SharesModule: no status action for service %s: %s", service_name, exc
                 )
         if stopped:
-            return False, ", ".join(stopped) + " not running"
-        return True, ", ".join(self._active_services) + " running"
+            return False, f"{shares}, " + ", ".join(stopped) + " not running"
+        return True, f"{shares}, " + ", ".join(self._active_services) + " running"
 
     def health_check(self) -> bool:
         return self.health()[0]
