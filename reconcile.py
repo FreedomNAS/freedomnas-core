@@ -14,6 +14,7 @@ All OS operations delegate to FreedomNASEngine; no subprocess calls here.
 
 from __future__ import annotations
 
+import json
 import logging
 import yaml
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager
     from freedomnas.datasets import nfs_export_options, owner_group
-    from freedomnas import usershares
+    from freedomnas import netconfig, usershares
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -37,6 +38,7 @@ except ImportError:
     )
     from config import ConfigurationManager  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
+    import netconfig  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -110,7 +112,7 @@ class ReconciliationEngine:
     - additive   : add and change only, never remove; for applying a
                    partial desired-state file from the command line.
 
-    Order: hostname → timezone → pools → users → services → SSH → SMB shares
+    Order: hostname → timezone → network interfaces → pools → users → services → SSH → SMB shares
     → NFS exports → removal of users. Pools come before the shares on them,
     users before the shares that name them, and users go last so no share
     still refers to them.
@@ -182,6 +184,7 @@ class ReconciliationEngine:
                 "hostname": self._read("network", "hostname_get"),
                 "timezone": self._read("system", "timezone_get"),
             },
+            "network": {"links": self._observe_links()},
             "storage": {"pools": self._observe_pools()},
             "users": self._observe_users(),
             "smb_shares": self._observe_smb_shares(),
@@ -194,6 +197,19 @@ class ReconciliationEngine:
         except (CommandExecutionError, CommandTranslationError):
             return None
         return stdout.strip()
+
+    def _observe_links(self) -> Optional[List[str]]:
+        """Interface names: `ip -j addr show` JSON on Linux, bare names on FreeBSD."""
+        out = self._read("network", "list_interfaces")
+        if out is None:
+            return None
+        try:
+            listed = json.loads(out)
+        except ValueError:
+            return out.split()
+        if not isinstance(listed, list):
+            return None
+        return [i["ifname"] for i in listed if isinstance(i, dict) and i.get("ifname")]
 
     def _observe_pools(self) -> Optional[List[dict]]:
         out = self._read("zfs", "pool_list")
@@ -270,6 +286,12 @@ class ReconciliationEngine:
             have = current.get("system", {}).get(key)
             if want and want != have:
                 changes.append(Change(f"system.{key}", have, want, "modify" if have else "add"))
+
+        links = current.get("network", {}).get("links")
+        for iface in (desired.get("network") or {}).get("interfaces") or []:
+            name, config = iface.get("logical_name"), iface.get("config")
+            if name and config and links is not None and name in links:
+                changes.append(Change(f"network.interfaces.{name}", None, config, "ensure"))
 
         # A pool already imported is not necessarily in use: firstboot imports
         # every pool with -N and no cachefile to look for .freedomnas, so a
@@ -412,6 +434,9 @@ class ReconciliationEngine:
             elif path == "system.ssh":
                 results.extend(self._do_ssh(change.new_value))
 
+            elif path.startswith("network.interfaces."):
+                results.append(self._do_interface(path.split(".", 2)[2], change.new_value))
+
             elif path.startswith("storage.pools."):
                 if kind == "ensure":
                     results.extend(self._do_pool_adopt(change.new_value))
@@ -460,6 +485,25 @@ class ReconciliationEngine:
     # ------------------------------------------------------------------
     # Internal — atomic engine calls: system
     # ------------------------------------------------------------------
+
+    def _do_interface(self, name: str, config: dict) -> ActionResult:
+        """
+        Only an interface the system holds no FreedomNAS configuration for:
+        after a reflash or on new hardware. A configured one is left alone, so
+        a boot never takes the network down to re-apply what is already there.
+        """
+        params = {"interface": name}
+        try:
+            if netconfig.is_configured(self.engine, name):
+                return ActionResult(action="network.interface", params=params, target_state="skipped",
+                                    error="already configured")
+            netconfig.apply(self.engine, name, config)
+        except (CommandExecutionError, CommandTranslationError, KeyError, ValueError) as exc:
+            logger.error("Failed to configure interface %s: %s", name, exc)
+            return ActionResult(action="network.interface", params=params, target_state="failed",
+                                error=str(exc))
+        logger.info("Interface %s configured", name)
+        return ActionResult(action="network.interface", params=params, target_state="applied")
 
     def _do_hostname(self, hostname: str) -> ActionResult:
         params = {"hostname": hostname}

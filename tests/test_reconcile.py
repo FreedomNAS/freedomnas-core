@@ -82,7 +82,8 @@ class FakeEngine:
 
     def actions(self):
         observing = {("zfs", "pool_list"), ("network", "hostname_get"), ("system", "timezone_get"),
-                     ("users", "list"), ("users", "list_groups"), ("samba", "list_shares")}
+                     ("users", "list"), ("users", "list_groups"), ("samba", "list_shares"),
+                     ("network", "list_interfaces")}
         return [(c, a) for c, a, _ in self.calls if (c, a) not in observing]
 
 
@@ -646,3 +647,51 @@ def test_a_pool_that_failed_to_import_is_not_touched():
                         acltypes="tank\tnfsv4\tlocal\n")
     reconciler(engine)._apply_changes([Change("storage.pools.tank", None, {"name": "tank"}, "add")])
     assert _acl_sets(engine) == []
+
+
+# ---------------------------------------------------------------------------
+# network interfaces
+# ---------------------------------------------------------------------------
+
+LAN = {"logical_name": "eth0", "config": {"method": "static", "ip": "192.168.1.5", "cidr": 24,
+                                          "gateway": "192.168.1.1", "dns": ["1.1.1.1"]}}
+
+
+def test_observe_lists_interface_names():
+    engine = FakeEngine(values={})
+    engine.execute = lambda c, a, **k: (
+        ('[{"ifname": "lo"}, {"ifname": "eth0"}]', "") if (c, a) == ("network", "list_interfaces")
+        else ("", ""))
+    assert reconciler(engine).observe()["network"]["links"] == ["lo", "eth0"]
+
+
+def test_an_interface_present_on_the_system_is_ensured():
+    desired = {"network": {"interfaces": [LAN, {"logical_name": "eth9", "config": {"method": "dhcp"}},
+                                          {"logical_name": "eth1"}]}}
+    assert paths(diff(desired, {"network": {"links": ["lo", "eth0", "eth1"]}})) == [
+        ("network.interfaces.eth0", "ensure")]
+    assert diff(desired, {"network": {"links": None}}) == []
+
+
+def test_a_configured_interface_is_left_alone():
+    engine = FakeEngine()
+    engine.execute = lambda c, a, **k: (engine.calls.append((c, a, k)) or
+                                        ("yes\n" if a == "connection_exists" else ""), "")
+    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+    assert result.target_state == "skipped"
+    assert [a for _, a, _ in engine.calls] == ["connection_exists"]
+
+
+def test_an_unconfigured_interface_gets_its_configuration_back():
+    engine = FakeEngine()
+    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+    assert result.target_state == "applied"
+    assert [a for c, a, _ in engine.calls if c == "network"] == [
+        "connection_exists", "connection_ensure", "ipv4_static", "ipv6_auto", "dns_set",
+        "mtu_auto", "connection_activate"]
+
+
+def test_a_failing_interface_is_reported():
+    engine = FakeEngine(failing={("network", "connection_activate")})
+    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+    assert result.target_state == "failed" and "connection_activate" in result.error
