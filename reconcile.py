@@ -29,7 +29,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager
     from freedomnas.datasets import nfs_export_options, owner_group
-    from freedomnas import netconfig, usershares
+    from freedomnas import netconfig, netnames, usershares
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -39,6 +39,7 @@ except ImportError:
     from config import ConfigurationManager  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
+    import netnames  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -287,11 +288,10 @@ class ReconciliationEngine:
             if want and want != have:
                 changes.append(Change(f"system.{key}", have, want, "modify" if have else "add"))
 
-        links = current.get("network", {}).get("links")
-        for iface in (desired.get("network") or {}).get("interfaces") or []:
-            name, config = iface.get("logical_name"), iface.get("config")
-            if name and config and links is not None and name in links:
-                changes.append(Change(f"network.interfaces.{name}", None, config, "ensure"))
+        if current.get("network", {}).get("links"):
+            wanted = [i for i in (desired.get("network") or {}).get("interfaces") or []
+                      if i.get("logical_name") and i.get("config")]
+            changes.append(Change("network.interfaces", None, wanted, "ensure"))
 
         # A pool already imported is not necessarily in use: firstboot imports
         # every pool with -N and no cachefile to look for .freedomnas, so a
@@ -434,8 +434,8 @@ class ReconciliationEngine:
             elif path == "system.ssh":
                 results.extend(self._do_ssh(change.new_value))
 
-            elif path.startswith("network.interfaces."):
-                results.append(self._do_interface(path.split(".", 2)[2], change.new_value))
+            elif path == "network.interfaces":
+                results.extend(self._do_network(change.new_value))
 
             elif path.startswith("storage.pools."):
                 if kind == "ensure":
@@ -486,7 +486,42 @@ class ReconciliationEngine:
     # Internal — atomic engine calls: system
     # ------------------------------------------------------------------
 
-    def _do_interface(self, name: str, config: dict) -> ActionResult:
+    def _do_network(self, interfaces: List[dict]) -> List[ActionResult]:
+        """
+        Physical cards get their FreedomNAS names first (netnames), then each
+        configured interface its configuration, found by MAC address when the
+        entry records one: a restored entry may still carry the old name.
+        """
+        results: List[ActionResult] = []
+        renamed: Dict[str, str] = {}
+        try:
+            done, renamed = netnames.apply(self.engine, self.config)
+            for line in done:
+                logger.info("Network names: %s", line)
+                results.append(ActionResult(action="network.names", params={"done": line},
+                                            target_state="applied"))
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.error("Failed to name the network cards: %s", exc)
+            results.append(ActionResult(action="network.names", params={}, target_state="failed",
+                                        error=str(exc)))
+        by_mac = {}
+        try:
+            stdout, _ = self.engine.execute("network", "list_physical")
+            by_mac = {c["mac"]: c["name"] for c in netnames.parse_physical(stdout)}
+        except (CommandExecutionError, CommandTranslationError):
+            pass
+        links = self._observe_links() or []
+        for entry in interfaces:
+            name = (by_mac.get(str(entry.get("mac_address") or "").lower())
+                    or renamed.get(entry["logical_name"], entry["logical_name"]))
+            if name not in links:
+                results.append(ActionResult(action="network.interface", params={"interface": name},
+                                            target_state="skipped", error="not on this system"))
+                continue
+            results.append(self._do_interface(name, entry["config"], name in renamed.values()))
+        return results
+
+    def _do_interface(self, name: str, config: dict, renamed: bool = False) -> ActionResult:
         """
         Only an interface the system holds no FreedomNAS configuration for:
         after a reflash or on new hardware. A configured one is left alone, so
@@ -495,8 +530,12 @@ class ReconciliationEngine:
         params = {"interface": name}
         try:
             if netconfig.is_configured(self.engine, name):
-                return ActionResult(action="network.interface", params=params, target_state="skipped",
-                                    error="already configured")
+                if not renamed:
+                    return ActionResult(action="network.interface", params=params, target_state="skipped",
+                                        error="already configured")
+                self.engine.execute("network", "connection_activate", timeout=60, interface=name)
+                logger.info("Interface %s activated under its new name", name)
+                return ActionResult(action="network.interface", params=params, target_state="applied")
             netconfig.apply(self.engine, name, config)
         except (CommandExecutionError, CommandTranslationError, KeyError, ValueError) as exc:
             logger.error("Failed to configure interface %s: %s", name, exc)

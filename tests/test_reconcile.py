@@ -101,6 +101,30 @@ class FakeConfig:
     def to_dict(self):
         return self.state
 
+    def get(self, key, default=None):
+        value = self.state
+        for part in key.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        return default if value is None else value
+
+    def set(self, key, value):
+        *parents, last = key.split(".")
+        node = self.state
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[last] = value
+
+    def get_interface(self, name):
+        return next((i for i in self.get("network.interfaces", []) if i.get("logical_name") == name), None)
+
+    def add_interface(self, entry):
+        self.remove_interface(entry["logical_name"])
+        self.state.setdefault("network", {}).setdefault("interfaces", []).append(entry)
+
+    def remove_interface(self, name):
+        network = self.state.setdefault("network", {})
+        network["interfaces"] = [i for i in network.get("interfaces", []) if i.get("logical_name") != name]
+
 
 def reconciler(engine=None, config=None):
     return ReconciliationEngine(engine or FakeEngine(), config or FakeConfig())
@@ -665,33 +689,66 @@ def test_observe_lists_interface_names():
     assert reconciler(engine).observe()["network"]["links"] == ["lo", "eth0"]
 
 
-def test_an_interface_present_on_the_system_is_ensured():
-    desired = {"network": {"interfaces": [LAN, {"logical_name": "eth9", "config": {"method": "dhcp"}},
-                                          {"logical_name": "eth1"}]}}
-    assert paths(diff(desired, {"network": {"links": ["lo", "eth0", "eth1"]}})) == [
-        ("network.interfaces.eth0", "ensure")]
+def test_configured_interfaces_are_ensured_together():
+    desired = {"network": {"interfaces": [LAN, {"logical_name": "eth1"}]}}
+    [change] = diff(desired, {"network": {"links": ["lo", "eth0"]}})
+    assert (change.path, change.change_type, change.new_value) == ("network.interfaces", "ensure", [LAN])
     assert diff(desired, {"network": {"links": None}}) == []
 
 
 def test_a_configured_interface_is_left_alone():
     engine = FakeEngine()
     engine.execute = lambda c, a, **k: (engine.calls.append((c, a, k)) or
-                                        ("yes\n" if a == "connection_exists" else ""), "")
-    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+                                        {"connection_exists": "yes\n",
+                                         "list_interfaces": '[{"ifname": "eth0"}]'}.get(a, ""), "")
+    [result] = reconciler(engine)._do_network([LAN])
     assert result.target_state == "skipped"
-    assert [a for _, a, _ in engine.calls] == ["connection_exists"]
+    assert [a for _, a, _ in engine.calls] == ["list_physical", "list_physical", "list_interfaces", "connection_exists"]
+
+
+def _with_links(engine, links):
+    plain = engine.execute
+    engine.execute = lambda c, a, **k: (
+        (engine.calls.append((c, a, k)) or (links, "")) if (c, a) == ("network", "list_interfaces")
+        else plain(c, a, **k))
+    return engine
 
 
 def test_an_unconfigured_interface_gets_its_configuration_back():
-    engine = FakeEngine()
-    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+    engine = _with_links(FakeEngine(), '[{"ifname": "eth0"}]')
+    [result] = reconciler(engine)._do_network([LAN])
     assert result.target_state == "applied"
-    assert [a for c, a, _ in engine.calls if c == "network"] == [
+    assert [a for c, a, _ in engine.calls
+            if c == "network" and a not in ("list_physical", "list_interfaces")] == [
         "connection_exists", "connection_ensure", "ipv4_static", "ipv6_auto", "dns_set",
         "mtu_auto", "connection_activate"]
 
 
 def test_a_failing_interface_is_reported():
-    engine = FakeEngine(failing={("network", "connection_activate")})
-    [result] = reconciler(engine)._apply_changes([Change("network.interfaces.eth0", None, LAN["config"], "ensure")])
+    engine = _with_links(FakeEngine(failing={("network", "connection_activate")}), '[{"ifname": "eth0"}]')
+    [result] = reconciler(engine)._do_network([LAN])
     assert result.target_state == "failed" and "connection_activate" in result.error
+
+
+def test_an_interface_not_on_this_system_is_skipped():
+    engine = _with_links(FakeEngine(), '[{"ifname": "eth1"}]')
+    [result] = reconciler(engine)._do_network([LAN])
+    assert result.target_state == "skipped" and result.error == "not on this system"
+
+
+def test_an_entry_is_found_by_its_mac_under_its_new_name():
+    engine = _with_links(FakeEngine(values={}), '[{"ifname": "fnas_lan1"}]')
+    plain = engine.execute
+    engine.execute = lambda c, a, **k: (("fnas_lan1 52:54:00:12:34:56 fnas_lan1\n", "")
+                                        if a == "list_physical" else plain(c, a, **k))
+    [result] = reconciler(engine)._do_network([dict(LAN, mac_address="52:54:00:12:34:56")])
+    assert result.params == {"interface": "fnas_lan1"} and result.target_state == "applied"
+
+
+def test_a_renamed_configured_interface_is_activated_again():
+    engine = FakeEngine()
+    engine.execute = lambda c, a, **k: (engine.calls.append((c, a, k)) or
+                                        {"connection_exists": "yes\n"}.get(a, ""), "")
+    result = reconciler(engine)._do_interface("fnas_lan2", LAN["config"], renamed=True)
+    assert result.target_state == "applied"
+    assert [a for _, a, _ in engine.calls] == ["connection_exists", "connection_activate"]
