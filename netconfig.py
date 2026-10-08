@@ -60,6 +60,28 @@ def _prefix(value, version: int, what: str) -> int:
     return prefix
 
 
+def _routes(value, config: Dict) -> List[Dict[str, str]]:
+    """Static routes: a list of {destination, gateway}, or lines "destination gateway"."""
+    if isinstance(value, str):
+        value = [line.replace(" via ", " ").split() for line in value.splitlines() if line.strip()]
+        value = [{"destination": f[0], "gateway": f[1] if len(f) > 1 else ""} for f in value]
+    routes = []
+    for route in value or []:
+        destination = str(route.get("destination") or "").strip()
+        gateway = str(route.get("gateway") or "").strip()
+        try:
+            network = ipaddress.ip_network(destination, strict=False)
+        except ValueError:
+            raise NetConfigProblem(f"Route: {destination!r} is not a network (like 10.20.0.0/16)")
+        if network.prefixlen == 0:
+            raise NetConfigProblem("Route: the default route is the gateway, not a static route")
+        gw = _address(gateway, network.version, f"Route to {network}: gateway")
+        if network.version == 6 and config.get("ipv6_method") == "disabled":
+            raise NetConfigProblem(f"Route to {network} needs IPv6 to be on")
+        routes.append({"destination": str(network), "gateway": gw})
+    return routes
+
+
 def normalize(request: Dict) -> Dict:
     method = request.get("method") or "dhcp"
     if method not in IPV4_METHODS:
@@ -100,6 +122,8 @@ def normalize(request: Dict) -> Dict:
         config["ipv6_gateway"] = _address(gateway, 6, "IPv6 gateway") if gateway else ""
     elif any(ipaddress.ip_address(d).version == 6 for d in dns) and ipv6 == "disabled":
         raise NetConfigProblem("IPv6 DNS servers need IPv6 to be on")
+
+    config["routes"] = _routes(request.get("routes"), config)
 
     mtu = request.get("mtu")
     if mtu in (None, "", 0, "0"):
@@ -144,6 +168,8 @@ def steps(interface: str, config: Dict) -> List[Tuple[str, Dict]]:
         plan.append(("mtu_set", {"mtu": config["mtu"]}))
     else:
         plan.append(("mtu_auto", {}))
+    plan.append(("routes_set", {"routes": " ".join(f"{r['destination']}={r['gateway']}"
+                                                    for r in config.get("routes") or [])}))
     plan.append(("connection_activate", {}))
     return [(action, dict(kwargs, interface=interface)) for action, kwargs in plan]
 
@@ -247,14 +273,20 @@ def normalize_virtual(request: Dict, interfaces: List[Dict], present: Dict[str, 
     return entry
 
 
-def virtual_steps(entry: Dict) -> List[Tuple[str, Dict]]:
-    """Create a bridge, bond or VLAN, give it its addresses, attach its ports."""
+def virtual_steps(entry: Dict, create: bool = True) -> List[Tuple[str, Dict]]:
+    """
+    Create a bridge, bond or VLAN, give it its addresses, attach its ports.
+    Without `create`, only give an existing one new addresses: on FreeBSD its
+    ports and mode live on the same rc.conf line, so they are written again.
+    """
     name, kind = entry["logical_name"], entry["type"]
-    if kind == "vlan":
-        create = [("vlan_create", {"interface": name, "parent": entry["parent"],
+    if not create:
+        making = []
+    elif kind == "vlan":
+        making = [("vlan_create", {"interface": name, "parent": entry["parent"],
                                    "vlan_id": entry["vlan_id"]})]
     else:
-        create = [(f"{kind}_create", {"interface": name})]
+        making = [(f"{kind}_create", {"interface": name})]
     address = [s for s in steps(name, entry.get("config") or {}) if s[0] != "connection_activate"]
     extra: List[Tuple[str, Dict]] = []
     if kind == "bridge":
@@ -267,7 +299,14 @@ def virtual_steps(entry: Dict) -> List[Tuple[str, Dict]]:
         extra.append(("mac_set", {"interface": name, "mac": entry["mac_address"]}))
     activate = [("port_activate", {"port": port}) for port in entry.get("ports") or []]
     activate.append(("virtual_activate", {"interface": name}))
-    return create + address + extra + activate
+    return making + address + extra + activate
+
+
+def reconfigure_steps(entry: Dict, config: Dict) -> List[Tuple[str, Dict]]:
+    """New addresses for an interface: a card, or a bridge, bond or VLAN as it is."""
+    if entry.get("type") in VIRTUAL_TYPES:
+        return virtual_steps(dict(entry, config=config), create=False)
+    return steps(entry["logical_name"], config)
 
 
 def virtual_remove_steps(entry: Dict) -> List[Tuple[str, Dict]]:

@@ -19,7 +19,7 @@ FULL = {"method": "static", "ip": "192.168.1.50", "cidr": "24", "gateway": "192.
 
 def test_defaults_are_dhcp_and_automatic():
     assert netconfig.normalize({}) == {"method": "dhcp", "dns": [], "dns_search": [],
-                                       "ipv6_method": "auto", "mtu": None}
+                                       "ipv6_method": "auto", "routes": [], "mtu": None}
 
 
 def test_a_full_configuration_is_normalized():
@@ -67,7 +67,7 @@ def test_bad_interface_names(name):
 def test_steps_for_dhcp():
     actions = [a for a, _ in netconfig.steps("eth0", netconfig.normalize({}))]
     assert actions == ["connection_ensure", "ipv4_dhcp", "ipv6_auto", "dns_auto",
-                       "mtu_auto", "connection_activate"]
+                       "mtu_auto", "routes_set", "connection_activate"]
 
 
 def test_steps_for_a_full_configuration():
@@ -83,7 +83,7 @@ def test_a_configuration_saved_by_the_old_static_route_still_applies():
            "dns": ["1.1.1.1"]}
     actions = [a for a, _ in netconfig.steps("eth0", old)]
     assert actions == ["connection_ensure", "ipv4_static", "ipv6_auto", "dns_set",
-                       "mtu_auto", "connection_activate"]
+                       "mtu_auto", "routes_set", "connection_activate"]
 
 
 @pytest.mark.parametrize("edition", EDITIONS)
@@ -194,6 +194,7 @@ def test_bridge_steps_create_address_attach_and_activate():
                                                     "dns": "10.0.0.1"}}, [], PRESENT)
     actions = [a for a, _ in netconfig.virtual_steps(entry)]
     assert actions == ["bridge_create", "connection_ensure", "ipv4_static", "ipv6_auto", "dns_set", "mtu_auto",
+                       "routes_set",
                        "bridge_stp_on", "bridge_port_add", "bridge_port_add", "mac_set",
                        "port_activate", "port_activate", "virtual_activate"]
 
@@ -212,3 +213,36 @@ def test_every_edition_has_the_virtual_steps(edition):
     for entry in entries:
         for action, kwargs in netconfig.virtual_steps(entry) + netconfig.virtual_remove_steps(entry):
             assert engine.get_command("network", action, **kwargs)
+
+
+def test_routes_from_lines_and_dicts():
+    config = netconfig.normalize({"routes": "10.20.0.5/16 via 192.168.1.254\nfd10::/64 fd00::1\n"})
+    assert config["routes"] == [{"destination": "10.20.0.0/16", "gateway": "192.168.1.254"},
+                                {"destination": "fd10::/64", "gateway": "fd00::1"}]
+    steps = dict(netconfig.steps("eth0", config))
+    assert steps["routes_set"]["routes"] == "10.20.0.0/16=192.168.1.254 fd10::/64=fd00::1"
+    assert dict(netconfig.steps("eth0", netconfig.normalize({})))["routes_set"]["routes"] == ""
+
+
+@pytest.mark.parametrize("routes, problem", [
+    ("nowhere 192.168.1.1", "not a network"),
+    ("0.0.0.0/0 192.168.1.1", "default route"),
+    ("10.0.0.0/8", "IPv4 address"),
+    ("10.0.0.0/8 fd00::1", "IPv4 address"),
+])
+def test_bad_routes(routes, problem):
+    with pytest.raises(NetConfigProblem, match=problem):
+        netconfig.normalize({"routes": routes})
+
+
+def test_ipv6_routes_need_ipv6():
+    with pytest.raises(NetConfigProblem, match="IPv6 to be on"):
+        netconfig.normalize({"routes": "fd10::/64 fd00::1", "ipv6_method": "disabled"})
+
+
+@pytest.mark.parametrize("edition", EDITIONS)
+def test_routes_reach_every_edition_as_separate_words(edition):
+    engine = FreedomNASEngine.for_target(edition, profile_dir=PROFILES_DIR)
+    command = engine.get_command("network", "routes_set", interface="fnas_lan1",
+                                 routes="10.20.0.0/16=192.168.1.254 fd10::/64=fd00::1")
+    assert "in 10.20.0.0/16=192.168.1.254 fd10::/64=fd00::1;" in command

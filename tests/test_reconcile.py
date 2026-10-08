@@ -721,7 +721,7 @@ def test_an_unconfigured_interface_gets_its_configuration_back():
     assert [a for c, a, _ in engine.calls
             if c == "network" and a not in ("list_physical", "list_interfaces")] == [
         "connection_exists", "connection_ensure", "ipv4_static", "ipv6_auto", "dns_set",
-        "mtu_auto", "connection_activate"]
+        "mtu_auto", "routes_set", "connection_activate"]
 
 
 def test_a_failing_interface_is_reported():
