@@ -752,3 +752,33 @@ def test_a_renamed_configured_interface_is_activated_again():
     result = reconciler(engine)._do_interface("fnas_lan2", LAN["config"], renamed=True)
     assert result.target_state == "applied"
     assert [a for _, a, _ in engine.calls] == ["connection_exists", "connection_activate"]
+
+
+BRIDGE = {"logical_name": "fnas_bridge1", "type": "bridge", "ports": ["fnas_lan1"], "stp": False,
+          "mac_address": "52:54:00:12:34:56", "config": {"method": "dhcp"}}
+PORT = {"logical_name": "fnas_lan1", "master": "fnas_bridge1", "mac_address": "52:54:00:12:34:56"}
+
+
+def test_a_missing_bridge_is_created_with_its_ports():
+    engine = _with_links(FakeEngine(), '[{"ifname": "fnas_lan1"}]')
+    results = reconciler(engine)._do_network([BRIDGE, PORT])
+    assert [(r.action, r.target_state) for r in results] == [("network.virtual", "applied")]
+    actions = [a for c, a, _ in engine.calls if c == "network" and a not in ("list_physical", "list_interfaces")]
+    assert actions[:2] == ["connection_exists", "bridge_create"]
+    assert "bridge_port_add" in actions and actions[-1] == "virtual_activate"
+
+
+def test_bonds_and_vlans_come_before_bridges():
+    bond = {"logical_name": "fnas_bond1", "type": "bond", "ports": ["fnas_lan2", "fnas_lan3"], "mode": "lacp",
+            "config": {}}
+    vlan = {"logical_name": "fnas_vlan10", "type": "vlan", "parent": "fnas_bond1", "vlan_id": 10, "config": {}}
+    engine = _with_links(FakeEngine(), '[{"ifname": "fnas_lan1"}, {"ifname": "fnas_lan2"}, {"ifname": "fnas_lan3"}]')
+    results = reconciler(engine)._do_network([BRIDGE, vlan, bond])
+    assert [r.params["interface"] for r in results] == ["fnas_bond1", "fnas_vlan10", "fnas_bridge1"]
+    assert all(r.target_state == "applied" for r in results)
+
+
+def test_a_bridge_whose_port_is_missing_is_skipped():
+    engine = _with_links(FakeEngine(), '[{"ifname": "fnas_lan2"}]')
+    [result] = reconciler(engine)._do_network([BRIDGE])
+    assert result.target_state == "skipped" and "fnas_lan1" in result.error

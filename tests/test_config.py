@@ -422,3 +422,11 @@ def test_remove_and_rename_root_snapshots(tmp_path):
     assert [r["name"] for r in cfg.get_root_snapshots()] == ["tank/a@s2"]
     cfg.rename_root_snapshot("tank/a@s2", "tank/a@kept")
     assert [r["name"] for r in cfg.get_root_snapshots()] == ["tank/a@kept"]
+
+
+def test_a_bridge_does_not_take_its_ports_mac_in_the_name_mapping(tmp_path):
+    from config import ConfigurationManager
+    cfg = ConfigurationManager(str(tmp_path / "config.yaml"))
+    cfg.add_interface({"logical_name": "fnas_lan1", "mac_address": "52:54:00:00:00:0a"})
+    cfg.add_interface({"logical_name": "fnas_bridge1", "type": "bridge", "mac_address": "52:54:00:00:00:0a"})
+    assert cfg.get("network.interfaces_mapping") == {"52:54:00:00:00:0a": "fnas_lan1"}

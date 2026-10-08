@@ -32,8 +32,6 @@ def parse_physical(text: str) -> List[Dict[str, str]]:
         if not _MAC.match(mac) or mac == "00:00:00:00:00:00":
             continue
         name = fields[0]
-        if name.startswith("fnas_") and not name.startswith(PREFIX):
-            continue
         cards.append({"name": name, "mac": mac, "driver": fields[2] if len(fields) > 2 else name})
     return sorted(cards, key=lambda c: _natural(c["name"]))
 
@@ -43,7 +41,7 @@ def plan(cards: List[Dict[str, str]], mapping: Dict[str, str]) -> Tuple[Dict[str
     MAC → name for every card present, and the names that moved to another
     card: name → the MAC it had before.
     """
-    mapping = {mac.lower(): name for mac, name in (mapping or {}).items()}
+    mapping = {mac.lower(): name for mac, name in (mapping or {}).items() if name.startswith(PREFIX)}
     present = [c["mac"] for c in cards]
     names: Dict[str, str] = {}
     for mac in present:
@@ -104,7 +102,7 @@ def apply(engine, config) -> Tuple[List[str], Dict[str, str]]:
         done.append(f"{card['name']} ({card['mac']}) is now {new}")
 
     final = {mac: name for mac, name in mapping.items()
-             if mac.lower() not in names and name not in names.values()}
+             if mac.lower() not in names and name not in names.values() and name.startswith(PREFIX)}
     final.update(names)
     for card in cards:
         entry = config.get_interface(names[card["mac"]])

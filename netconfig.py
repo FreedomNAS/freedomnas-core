@@ -172,3 +172,111 @@ def checkpoint_confirm(engine, checkpoint: str) -> None:
 
 def checkpoint_rollback(engine, checkpoint: str) -> None:
     engine.execute("network", "checkpoint_rollback", checkpoint=checkpoint, timeout=60)
+
+
+VIRTUAL_TYPES = ("bridge", "bond", "vlan")
+BOND_MODES = ("lacp", "failover")
+PREFIXES = {"bridge": "fnas_bridge", "bond": "fnas_bond", "vlan": "fnas_vlan"}
+
+
+def virtual_name(kind: str, taken, vlan_id: int = 0) -> str:
+    if kind == "vlan":
+        return f"{PREFIXES['vlan']}{vlan_id}"
+    number = 1
+    while f"{PREFIXES[kind]}{number}" in taken:
+        number += 1
+    return f"{PREFIXES[kind]}{number}"
+
+
+def normalize_virtual(request: Dict, interfaces: List[Dict], present: Dict[str, str]) -> Dict:
+    """
+    A bridge, bond or VLAN entry for network.interfaces. `interfaces` are the
+    entries config.yaml holds, `present` maps the interfaces this system has
+    to their MAC address.
+    """
+    kind = request.get("type")
+    if kind not in VIRTUAL_TYPES:
+        raise NetConfigProblem("type is bridge, bond or vlan")
+    entries = {i.get("logical_name"): i for i in interfaces}
+    taken = set(entries) | set(present)
+    busy = {i["logical_name"]: i.get("master") for i in interfaces if i.get("master")}
+    entry: Dict = {"type": kind}
+
+    if kind == "vlan":
+        parent = str(request.get("parent") or "")
+        if parent not in present and parent not in entries:
+            raise NetConfigProblem(f"No interface named {parent!r}")
+        if busy.get(parent):
+            raise NetConfigProblem(f"{parent} is a port of {busy[parent]}")
+        try:
+            vlan_id = int(request.get("vlan_id"))
+        except (TypeError, ValueError):
+            raise NetConfigProblem("The VLAN ID is a number")
+        if not 1 <= vlan_id <= 4094:
+            raise NetConfigProblem("The VLAN ID goes from 1 to 4094")
+        entry.update(parent=parent, vlan_id=vlan_id)
+        entry["logical_name"] = virtual_name("vlan", taken, vlan_id)
+        if entry["logical_name"] in taken:
+            raise NetConfigProblem(f"VLAN {vlan_id} exists already")
+    else:
+        ports = _words(request.get("ports"))
+        if not ports:
+            raise NetConfigProblem(f"A {kind} needs at least one port")
+        if kind == "bond" and len(ports) < 2:
+            raise NetConfigProblem("A bond needs at least two ports")
+        if len(set(ports)) != len(ports):
+            raise NetConfigProblem("A port is listed twice")
+        for port in ports:
+            if port not in present:
+                raise NetConfigProblem(f"No interface named {port!r}")
+            if busy.get(port):
+                raise NetConfigProblem(f"{port} is a port of {busy[port]} already")
+            if not port.startswith("fnas_lan"):
+                raise NetConfigProblem(f"The ports of a {kind} are network cards (fnas_lan…)")
+        entry["ports"] = ports
+        entry["mac_address"] = present[ports[0]] or ""
+        if kind == "bridge":
+            entry["stp"] = bool(request.get("stp"))
+        else:
+            mode = request.get("mode") or "lacp"
+            if mode not in BOND_MODES:
+                raise NetConfigProblem("The bond mode is lacp or failover")
+            entry["mode"] = mode
+        entry["logical_name"] = virtual_name(kind, taken)
+    entry["config"] = normalize(request.get("config") or {})
+    return entry
+
+
+def virtual_steps(entry: Dict) -> List[Tuple[str, Dict]]:
+    """Create a bridge, bond or VLAN, give it its addresses, attach its ports."""
+    name, kind = entry["logical_name"], entry["type"]
+    if kind == "vlan":
+        create = [("vlan_create", {"interface": name, "parent": entry["parent"],
+                                   "vlan_id": entry["vlan_id"]})]
+    else:
+        create = [(f"{kind}_create", {"interface": name})]
+    address = [s for s in steps(name, entry.get("config") or {}) if s[0] != "connection_activate"]
+    extra: List[Tuple[str, Dict]] = []
+    if kind == "bridge":
+        extra.append(("bridge_stp_on" if entry.get("stp") else "bridge_stp_off", {"interface": name}))
+    if kind == "bond":
+        extra.append((f"bond_mode_{entry.get('mode') or 'lacp'}", {"interface": name}))
+    for port in entry.get("ports") or []:
+        extra.append((f"{kind}_port_add", {"interface": name, "port": port}))
+    if entry.get("mac_address"):
+        extra.append(("mac_set", {"interface": name, "mac": entry["mac_address"]}))
+    activate = [("port_activate", {"port": port}) for port in entry.get("ports") or []]
+    activate.append(("virtual_activate", {"interface": name}))
+    return create + address + extra + activate
+
+
+def virtual_remove_steps(entry: Dict) -> List[Tuple[str, Dict]]:
+    name = entry["logical_name"]
+    plan = [("virtual_delete", {"interface": name})]
+    plan += [("port_release", {"port": port}) for port in entry.get("ports") or []]
+    return plan
+
+
+def run(engine, plan: List[Tuple[str, Dict]]) -> None:
+    for action, kwargs in plan:
+        engine.execute("network", action, timeout=60, **kwargs)

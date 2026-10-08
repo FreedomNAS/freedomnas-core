@@ -290,7 +290,7 @@ class ReconciliationEngine:
 
         if current.get("network", {}).get("links"):
             wanted = [i for i in (desired.get("network") or {}).get("interfaces") or []
-                      if i.get("logical_name") and i.get("config")]
+                      if i.get("logical_name") and (i.get("config") or i.get("type") in netconfig.VIRTUAL_TYPES)]
             changes.append(Change("network.interfaces", None, wanted, "ensure"))
 
         # A pool already imported is not necessarily in use: firstboot imports
@@ -511,7 +511,13 @@ class ReconciliationEngine:
         except (CommandExecutionError, CommandTranslationError):
             pass
         links = self._observe_links() or []
-        for entry in interfaces:
+        order = {"bond": 1, "vlan": 2, "bridge": 3}
+        for entry in sorted(interfaces, key=lambda e: order.get(e.get("type"), 0)):
+            if entry.get("type") in netconfig.VIRTUAL_TYPES:
+                results.append(self._do_virtual(entry, links))
+                continue
+            if entry.get("master"):
+                continue
             name = (by_mac.get(str(entry.get("mac_address") or "").lower())
                     or renamed.get(entry["logical_name"], entry["logical_name"]))
             if name not in links:
@@ -520,6 +526,27 @@ class ReconciliationEngine:
                 continue
             results.append(self._do_interface(name, entry["config"], name in renamed.values()))
         return results
+
+    def _do_virtual(self, entry: dict, links: List[str]) -> ActionResult:
+        name = entry["logical_name"]
+        params = {"interface": name, "type": entry["type"]}
+        missing = [p for p in (entry.get("ports") or []) + ([entry["parent"]] if entry.get("parent") else [])
+                   if p not in links]
+        if missing:
+            return ActionResult(action="network.virtual", params=params, target_state="skipped",
+                                error=f"{', '.join(missing)} not on this system")
+        try:
+            if netconfig.is_configured(self.engine, name):
+                return ActionResult(action="network.virtual", params=params, target_state="skipped",
+                                    error="already configured")
+            netconfig.run(self.engine, netconfig.virtual_steps(entry))
+        except (CommandExecutionError, CommandTranslationError, KeyError, ValueError) as exc:
+            logger.error("Failed to create %s %s: %s", entry["type"], name, exc)
+            return ActionResult(action="network.virtual", params=params, target_state="failed",
+                                error=str(exc))
+        links.append(name)
+        logger.info("%s %s created", entry["type"], name)
+        return ActionResult(action="network.virtual", params=params, target_state="applied")
 
     def _do_interface(self, name: str, config: dict, renamed: bool = False) -> ActionResult:
         """

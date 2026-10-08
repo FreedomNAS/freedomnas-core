@@ -141,3 +141,74 @@ def test_no_checkpoint_is_a_problem():
 def test_is_configured():
     assert netconfig.is_configured(FakeEngine({"connection_exists": "yes\n"}), "eth0")
     assert not netconfig.is_configured(FakeEngine(), "eth0")
+
+
+PRESENT = {"fnas_lan1": "52:54:00:00:00:0a", "fnas_lan2": "52:54:00:00:00:0b", "fnas_lan3": "52:54:00:00:00:0c"}
+
+
+def test_a_bridge_takes_the_mac_of_its_first_port():
+    entry = netconfig.normalize_virtual({"type": "bridge", "ports": "fnas_lan2, fnas_lan1"}, [], PRESENT)
+    assert entry == {"type": "bridge", "ports": ["fnas_lan2", "fnas_lan1"], "mac_address": PRESENT["fnas_lan2"],
+                     "stp": False, "logical_name": "fnas_bridge1", "config": netconfig.normalize({})}
+
+
+def test_names_count_up_past_the_ones_taken():
+    taken = [{"logical_name": "fnas_bridge1", "type": "bridge", "ports": ["fnas_lan3"]},
+             {"logical_name": "fnas_lan3", "master": "fnas_bridge1"}]
+    entry = netconfig.normalize_virtual({"type": "bridge", "ports": ["fnas_lan1"]}, taken, PRESENT)
+    assert entry["logical_name"] == "fnas_bridge2"
+    bond = netconfig.normalize_virtual({"type": "bond", "ports": ["fnas_lan1", "fnas_lan2"], "mode": "failover"},
+                                       taken, PRESENT)
+    assert (bond["logical_name"], bond["mode"]) == ("fnas_bond1", "failover")
+    vlan = netconfig.normalize_virtual({"type": "vlan", "parent": "fnas_lan1", "vlan_id": "10"}, taken, PRESENT)
+    assert (vlan["logical_name"], vlan["parent"], vlan["vlan_id"]) == ("fnas_vlan10", "fnas_lan1", 10)
+    assert "mac_address" not in vlan
+
+
+@pytest.mark.parametrize("request_, problem", [
+    ({"type": "tunnel"}, "bridge, bond or vlan"),
+    ({"type": "bridge", "ports": []}, "at least one port"),
+    ({"type": "bridge", "ports": ["fnas_lan9"]}, "No interface"),
+    ({"type": "bridge", "ports": ["fnas_lan3"]}, "port of fnas_bridge1"),
+    ({"type": "bridge", "ports": ["fnas_lan1", "fnas_lan1"]}, "twice"),
+    ({"type": "bridge", "ports": ["fnas_bridge1"]}, "network cards"),
+    ({"type": "bond", "ports": ["fnas_lan1"]}, "at least two"),
+    ({"type": "bond", "ports": ["fnas_lan1", "fnas_lan2"], "mode": "rr"}, "lacp or failover"),
+    ({"type": "vlan", "parent": "fnas_lan1", "vlan_id": 5000}, "1 to 4094"),
+    ({"type": "vlan", "parent": "fnas_lan1", "vlan_id": "x"}, "number"),
+    ({"type": "vlan", "parent": "fnas_lan3", "vlan_id": 5}, "port of"),
+    ({"type": "vlan", "parent": "fnas_lan1", "vlan_id": 7}, "exists already"),
+])
+def test_bad_virtual_requests(request_, problem):
+    taken = [{"logical_name": "fnas_bridge1", "type": "bridge", "ports": ["fnas_lan3"]},
+             {"logical_name": "fnas_lan3", "master": "fnas_bridge1"},
+             {"logical_name": "fnas_vlan7", "type": "vlan", "parent": "fnas_lan2", "vlan_id": 7}]
+    present = dict(PRESENT, fnas_bridge1="52:54:00:00:00:0c")
+    with pytest.raises(NetConfigProblem, match=problem):
+        netconfig.normalize_virtual(request_, taken, present)
+
+
+def test_bridge_steps_create_address_attach_and_activate():
+    entry = netconfig.normalize_virtual({"type": "bridge", "ports": ["fnas_lan1", "fnas_lan2"], "stp": True,
+                                         "config": {"method": "static", "ip": "10.0.0.5", "cidr": 24,
+                                                    "dns": "10.0.0.1"}}, [], PRESENT)
+    actions = [a for a, _ in netconfig.virtual_steps(entry)]
+    assert actions == ["bridge_create", "connection_ensure", "ipv4_static", "ipv6_auto", "dns_set", "mtu_auto",
+                       "bridge_stp_on", "bridge_port_add", "bridge_port_add", "mac_set",
+                       "port_activate", "port_activate", "virtual_activate"]
+
+
+@pytest.mark.parametrize("edition", EDITIONS)
+def test_every_edition_has_the_virtual_steps(edition):
+    engine = FreedomNASEngine.for_target(edition, profile_dir=PROFILES_DIR)
+    entries = [
+        netconfig.normalize_virtual({"type": "bridge", "ports": ["fnas_lan1"]}, [], PRESENT),
+        netconfig.normalize_virtual({"type": "bond", "ports": ["fnas_lan1", "fnas_lan2"]}, [], PRESENT),
+        netconfig.normalize_virtual({"type": "bond", "ports": ["fnas_lan1", "fnas_lan2"], "mode": "failover"},
+                                    [], PRESENT),
+        netconfig.normalize_virtual({"type": "vlan", "parent": "fnas_lan1", "vlan_id": 10}, [], PRESENT),
+    ]
+    entries[0]["stp"] = True
+    for entry in entries:
+        for action, kwargs in netconfig.virtual_steps(entry) + netconfig.virtual_remove_steps(entry):
+            assert engine.get_command("network", action, **kwargs)

@@ -16,7 +16,7 @@ def cards(*pairs):
 
 
 def test_parse_physical_skips_what_is_not_a_card():
-    text = ("eth1 52:54:00:00:00:0B eth1\nfnas_bridge1 52:54:00:00:00:0a bridge0\n"
+    text = ("eth1 52:54:00:00:00:0B eth1\n"
             "eth0 52:54:00:00:00:0a vtnet0\ndummy 00:00:00:00:00:00 dummy\nbroken\n"
             "fnas_lan2 52:54:00:00:00:0c fnas_lan2\n")
     assert netnames.parse_physical(text) == [
@@ -126,3 +126,8 @@ def test_every_edition_has_the_naming_commands(edition):
                                                  new_name="fnas_lan1"))
     assert engine.get_command("network", "rename_interface", old_name="eth0", new_name="fnas_lan1")
     assert engine.get_command("network", "connection_rename", old_name="eth0", new_name="fnas_lan1")
+
+
+def test_only_card_names_count_in_the_mapping():
+    names, _ = netnames.plan(cards(("fnas_bridge1", B), ("fnas_lan1", A)), {A: "fnas_lan1", B: "fnas_bridge1"})
+    assert names == {A: "fnas_lan1", B: "fnas_lan2"}

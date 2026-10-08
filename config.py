@@ -438,9 +438,8 @@ class ConfigurationManager:
         # Add new interface
         self.config["network"]["interfaces"].append(interface_config)
         
-        # Update MAC mapping if available
         mac = interface_config.get("mac_address")
-        if mac:
+        if mac and not interface_config.get("type"):
             self.config["network"]["interfaces_mapping"][mac] = logical_name
         
         self.save()
