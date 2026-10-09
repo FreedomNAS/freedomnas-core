@@ -361,9 +361,13 @@ def _translate(path: str, old: Dict[str, str], new: Dict[str, str]) -> Optional[
 
 
 def _acl_users(acl: str) -> List[str]:
+    """
+    The accounts a usershare ACL names. The WebUI writes them in Samba's
+    `Unix User\\<name>` form; the account is the part after the domain.
+    """
     users = []
     for entry in (acl or "").split(","):
-        name = entry.rsplit(":", 1)[0].strip()
+        name = entry.rsplit(":", 1)[0].strip().rsplit("\\", 1)[-1]
         if name and name.lower() != "everyone" and name not in users:
             users.append(name)
     return users

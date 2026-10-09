@@ -397,3 +397,7 @@ def test_a_locked_configuration_is_not_read(raw_pool, monkeypatch):
     monkeypatch.setattr(pool_import, "_read_config", lambda *a: read.append(a) or ({}, None))
     report = pool_import.inspect(locked, "42", occupied=free)
     assert report["freedomnas"] and report["config_locked"] and read == []
+
+
+def test_share_acls_name_accounts_without_samba_domain():
+    assert pool_import._acl_users("Unix User\\luca:F,Everyone:R,anna:R,Unix User\\luca:R") == ["luca", "anna"]
