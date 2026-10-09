@@ -394,6 +394,16 @@ class TestConfigPathDiscovery:
         assert not marker.exists() and not manager.needs_setup()
         manager.clear_setup_pending()
 
+    def test_the_pending_file_says_who_left_it(self, tmp_path, monkeypatch):
+        marker = tmp_path / "setup-pending"
+        monkeypatch.setattr(ConfigurationManager, "SETUP_PENDING_PATH", marker)
+        manager = ConfigurationManager(str(tmp_path / "config.yaml"))
+        assert manager.setup_pending_kind() == ""
+        marker.touch()
+        assert manager.setup_pending_kind() == ""
+        marker.write_text("install\n")
+        assert manager.setup_pending_kind() == "install"
+
 
 class TestServiceBoot:
     def test_a_boot_choice_survives_a_reload(self, tmp_path):

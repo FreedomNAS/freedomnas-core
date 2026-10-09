@@ -367,6 +367,17 @@ class ConfigurationManager:
     def setup_pending(self) -> bool:
         return self.setup_pending_path().exists()
 
+    def setup_pending_kind(self) -> str:
+        """
+        What left the setup-pending file: "" for a disk image, whose shipped
+        password is public, "install" for an installation, whose administrator
+        chose the password in the installer.
+        """
+        try:
+            return self.setup_pending_path().read_text().strip()
+        except OSError:
+            return ""
+
     def clear_setup_pending(self) -> None:
         self.setup_pending_path().unlink(missing_ok=True)
 
