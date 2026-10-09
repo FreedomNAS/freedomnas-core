@@ -826,3 +826,25 @@ def test_other_smb_errors_are_not_retried(monkeypatch):
     result = reconciler(engine)._do_smb_share_create({"name": "docs", "path": "/tank/docs"})
     assert result.target_state == "failed"
     assert [a for _, a, _ in engine.calls].count("create_share") == 1
+
+
+def test_an_administrator_joins_the_admin_groups_this_system_has(monkeypatch):
+    """A configuration restored from another edition names no `docker` group."""
+    import reconcile as reconcile_module
+    monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: ["docker"])
+    current = {"users": [{"username": "sarah", "groups": ["sudo"]},
+                         {"username": "luca", "groups": []}]}
+    desired = {"users": [ADMIN, {"username": "luca", "groups": []}]}
+    [change] = diff(desired, current)
+    assert (change.path, change.change_type) == ("users.sarah", "modify")
+    assert change.new_value["groups"] == ["sudo", "docker"]
+    current["users"][0]["groups"] = ["sudo", "docker"]
+    assert diff(desired, current) == []
+
+
+def test_without_an_administrator_no_admin_group_is_looked_up(monkeypatch):
+    import reconcile as reconcile_module
+    looked = []
+    monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: looked.append(1) or ["docker"])
+    diff({"users": [{"username": "luca", "groups": []}]}, {"users": [{"username": "luca", "groups": []}]})
+    assert looked == []

@@ -30,6 +30,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager
     from freedomnas.datasets import nfs_export_options, owner_group
+    from freedomnas.package_manager import admin_groups_present
     from freedomnas import netconfig, netnames, usershares, wireguard
 except ImportError:
     from engine import (  # type: ignore[no-redef]
@@ -39,6 +40,7 @@ except ImportError:
     )
     from config import ConfigurationManager  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
+    from package_manager import admin_groups_present  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
     import netnames  # type: ignore[no-redef]
     import wireguard  # type: ignore[no-redef]
@@ -319,6 +321,12 @@ class ReconciliationEngine:
         existing = {u["username"]: u for u in observed_users or []}
         wanted_users = {u["username"]: u for u in desired.get("users", []) if u.get("username")}
         managed = self._managed_groups(desired)
+        admin_extra = self._admin_groups(wanted_users.values())
+        managed |= set(admin_extra)
+        for name, user in list(wanted_users.items()):
+            if admin_extra and self._is_admin(user):
+                groups = list(user.get("groups", []))
+                wanted_users[name] = {**user, "groups": groups + [g for g in admin_extra if g not in groups]}
         for name, user in wanted_users.items():
             if observed_users is not None and name not in existing:
                 changes.append(Change(f"users.{name}", None, user, "add"))
@@ -412,6 +420,24 @@ class ReconciliationEngine:
             if value:
                 groups.add(value)
         return groups
+
+    def _is_admin(self, user: dict) -> bool:
+        sudo_group = self._profile_value("users", "sudo_group")
+        return bool(user.get("admin") or (sudo_group and sudo_group in user.get("groups", [])))
+
+    def _admin_groups(self, users) -> List[str]:
+        """
+        The groups administrators join here (admin_groups_present): a
+        configuration restored from another edition, or written before a
+        feature was installed, does not name them.
+        """
+        if not any(self._is_admin(u) for u in users):
+            return []
+        try:
+            return admin_groups_present(self.engine)
+        except Exception as exc:
+            logger.warning("Could not work out the administrators' groups: %s", exc)
+            return []
 
     def _names_an_admin(self, desired: dict) -> bool:
         sudo_group = self._profile_value("users", "sudo_group")

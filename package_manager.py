@@ -202,6 +202,38 @@ class PackageManager:
         return edition in self.manifest.get("supported_editions", [])
 
 
+def admin_groups_present(engine) -> List[str]:
+    """
+    The groups an administrator joins that exist on this system: every
+    category's `admin_groups` for the running edition and init, kept only
+    where the package that owns the group is installed. Docker's socket
+    belongs to `docker`, and topgrade updates the containers as the signed-in
+    administrator — whichever way that account became one: the installer,
+    the setup wizard, the Users page, or a configuration restored from a pool
+    that came from another edition.
+    """
+    try:
+        pm = PackageManager(str(Path(engine.profile_dir) / "packages"))
+    except (FileNotFoundError, OSError, ValueError):
+        return []
+    groups: List[str] = []
+    for category in pm.get_categories():
+        try:
+            wanted = pm.get_admin_groups_for_os(category["id"], engine.os_type, engine.init_system)
+        except (KeyError, ValueError, FileNotFoundError):
+            continue
+        for group in wanted:
+            if group in groups:
+                continue
+            try:
+                stdout, _ = engine.execute("users", "group_exists", group=group, check=False)
+            except Exception:
+                continue
+            if stdout.strip():
+                groups.append(group)
+    return groups
+
+
 # Example usage in installer/WebUI
 if __name__ == "__main__":
     try:

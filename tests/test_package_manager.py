@@ -150,3 +150,22 @@ def test_config_paths(pm):
     assert isinstance(paths, list)
     with pytest.raises(ValueError):
         pm.get_config_paths("core", "windows-nt")
+
+
+class _GroupEngine:
+    def __init__(self, existing, os_type="artix", init_system="dinit"):
+        self.profile_dir = str(Path(__file__).parent.parent.parent / "freedomnas-profiles")
+        self.os_type = os_type
+        self.init_system = init_system
+        self.existing = set(existing)
+
+    def execute(self, category, action, group="", check=True, **kwargs):
+        assert (category, action) == ("users", "group_exists")
+        return (f"{group}:x:970:\n" if group in self.existing else ""), ""
+
+
+def test_admin_groups_present_keeps_only_the_groups_that_exist():
+    from package_manager import admin_groups_present
+    assert admin_groups_present(_GroupEngine({"docker"})) == ["docker"]
+    assert admin_groups_present(_GroupEngine(set())) == []
+    assert admin_groups_present(_GroupEngine({"docker"}, os_type="freebsd", init_system="bsd_rc")) == []
