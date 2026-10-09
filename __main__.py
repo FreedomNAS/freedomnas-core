@@ -296,6 +296,26 @@ def cmd_reconcile(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_boot_ok(_args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas.config import ConfigurationManager
+        from freedomnas.bootstate import confirm_boot
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        from config import ConfigurationManager  # type: ignore
+        from bootstate import confirm_boot  # type: ignore
+
+    try:
+        engine = get_engine()
+        config = ConfigurationManager()
+    except Exception as exc:
+        print(f"ERROR: could not initialise engine: {exc}", file=sys.stderr)
+        return 1
+    confirm_boot(engine, config)
+    return 0
+
+
 def cmd_serve(_args) -> int:
     try:
         from freedomnas.engine import get_engine
@@ -417,6 +437,10 @@ def main() -> int:
     )
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
     path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending"])
+    sub.add_parser(
+        "boot-ok",
+        help="Confirm the boot: ends a new kernel's trial before an automatic rollback",
+    )
     sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
     sub.add_parser("version", help="Print package version")
 
@@ -432,6 +456,7 @@ def main() -> int:
         "snapshot-run": cmd_snapshot_run,
         "shadow-sync":  cmd_shadow_sync,
         "path":         cmd_path,
+        "boot-ok":      cmd_boot_ok,
         "serve":        cmd_serve,
         "version":      cmd_version,
     }

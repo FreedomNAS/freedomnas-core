@@ -40,6 +40,11 @@ BSD_ONLY = {("network", "list_interfaces_json")}
 # to correct the tool being configured, and its absence is the normal case.
 OPTIONAL = {("updates", "topgrade_extra_config")}
 
+# The UKI's rollback slot and boot state (bootstate.py, the update terminal):
+# editions that boot a UKI declare them, FreeBSD boots its own loader.
+UKI_ONLY = {("bootloader", action) for action in
+            ("uki_backup", "boot_ok", "autorollback_set", "boot_state", "rollback_forget")}
+
 
 def _merged_profile(edition: str) -> dict:
     """Assemble a profile the way engine._load_profile() does."""
@@ -118,6 +123,8 @@ def test_every_engine_call_exists_in_the_profile(edition):
     missing = []
     for (category, action), origins in sorted(_engine_calls().items()):
         if (category, action) in BSD_ONLY and edition != "freebsd":
+            continue
+        if (category, action) in UKI_ONLY and edition == "freebsd":
             continue
         if (category, action) in OPTIONAL or (category, action) in _guarded_pairs():
             continue
