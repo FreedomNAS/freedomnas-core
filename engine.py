@@ -18,8 +18,9 @@ import shlex
 import os
 import logging
 import threading
+import time
 from pathlib import Path
-from typing import Union, List, Dict, Any, Tuple, Optional
+from typing import Callable, Union, List, Dict, Any, Tuple, Optional
 
 try:
     from freedomnas import paths
@@ -107,6 +108,8 @@ class FreedomNASEngine:
     # engine command profiles).
     _RESERVED_PROFILE_DIRS = {"os", "init", "packages"}
     
+    output_listener: Optional[Callable[[str, str], None]] = None
+
     # Singleton pattern variables
     _instance: Optional['FreedomNASEngine'] = None
     _lock: threading.Lock = threading.Lock()
@@ -811,20 +814,26 @@ class FreedomNASEngine:
         """
         try:
             argv, use_shell = self._resolve_invocation(command, needs_shell)
-            result = subprocess.run(
-                argv,
-                shell=use_shell,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                timeout=timeout,
-            )
+            if self.output_listener is not None:
+                result = self._run_streaming(argv, use_shell, timeout)
+            else:
+                result = subprocess.run(
+                    argv,
+                    shell=use_shell,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=timeout,
+                )
 
             if check and result.returncode != 0:
-                logger.error(
-                    "Command failed with exit code %s: %s\nstdout:\n%s\nstderr:\n%s",
-                    result.returncode, command, result.stdout, result.stderr,
-                )
+                if self.output_listener is None:
+                    logger.error(
+                        "Command failed with exit code %s: %s\nstdout:\n%s\nstderr:\n%s",
+                        result.returncode, command, result.stdout, result.stderr,
+                    )
+                else:
+                    logger.error("Command failed with exit code %s: %s", result.returncode, command)
                 raise CommandExecutionError(
                     f"Command failed with exit code {result.returncode}\n"
                     f"Command: {command}\n"
@@ -846,6 +855,67 @@ class FreedomNASEngine:
                 f"Error: {e}"
             )
     
+    def _run_streaming(
+        self,
+        argv: Union[str, List[str]],
+        use_shell: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess:
+        """
+        Run a command like _run_safe, handing every line it prints to
+        output_listener as it comes, and return the whole output at the end.
+
+        The command gets its own session, so a timeout stops everything it
+        started, not only the shell. A daemon it started may keep the pipes
+        open after it exits, so the readers get ten seconds to drain, not
+        forever.
+        """
+        proc = subprocess.Popen(
+            argv,
+            shell=use_shell,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,
+        )
+        captured: Dict[str, List[str]] = {"stdout": [], "stderr": []}
+
+        def pump(name: str, stream: Any) -> None:
+            for line in stream:
+                captured[name].append(line)
+                try:
+                    self.output_listener(name, line.rstrip("\n"))
+                except Exception:
+                    pass
+            stream.close()
+
+        readers = [
+            threading.Thread(target=pump, args=("stdout", proc.stdout), daemon=True),
+            threading.Thread(target=pump, args=("stderr", proc.stderr), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            for reader in readers:
+                reader.join(timeout=5)
+            raise
+        deadline = time.monotonic() + 10
+        for reader in readers:
+            reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(
+            argv, proc.returncode, "".join(captured["stdout"]), "".join(captured["stderr"])
+        )
+
     def get_os_info(self) -> Dict[str, str]:
         """
         Get information about the detected OS and init system.

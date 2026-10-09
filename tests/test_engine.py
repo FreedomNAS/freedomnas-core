@@ -4,6 +4,7 @@ import builtins
 import json
 import shlex
 import subprocess
+import time
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
@@ -661,3 +662,52 @@ def test_init_system_falls_back_to_the_profile_when_nothing_is_detected(monkeypa
     engine = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
     monkeypatch.setattr(Path, "exists", lambda self: False)
     assert engine._detect_init_system({"init_system": "openrc"}) == "openrc"
+
+
+class TestOutputListener:
+    @pytest.fixture
+    def engine(self):
+        engine = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+        lines = []
+        engine.output_listener = lambda stream, line: lines.append((stream, line))
+        engine.lines = lines
+        return engine
+
+    def test_every_line_reaches_the_listener_and_the_result(self, engine):
+        out, err = engine._run_safe("printf 'a\\nb\\n'; printf 'oops\\n' >&2", 10, True, True)
+        assert out == "a\nb"
+        assert err == "oops"
+        assert ("stdout", "a") in engine.lines
+        assert ("stdout", "b") in engine.lines
+        assert ("stderr", "oops") in engine.lines
+
+    def test_a_line_arrives_before_the_command_ends(self, engine, tmp_path):
+        marker = tmp_path / "seen"
+        engine.output_listener = lambda stream, line: marker.write_text(line)
+        engine._run_safe(f"echo early; while [ ! -f {marker} ]; do sleep 0.05; done", 10, True, True)
+        assert marker.read_text() == "early"
+
+    def test_a_failure_still_raises_with_the_tail(self, engine):
+        with pytest.raises(CommandExecutionError) as excinfo:
+            engine._run_safe("echo why >&2; exit 3", 10, True, True)
+        assert "exit code 3" in str(excinfo.value)
+        assert "why" in str(excinfo.value)
+        assert ("stderr", "why") in engine.lines
+
+    def test_a_timeout_stops_the_whole_command(self, engine, tmp_path):
+        late = tmp_path / "late"
+        with pytest.raises(CommandExecutionError) as excinfo:
+            engine._run_safe(f"(sleep 3; touch {late}) & sleep 3", 1, True, True)
+        assert "timed out" in str(excinfo.value)
+        time.sleep(3)
+        assert not late.exists()
+
+    def test_a_daemon_holding_the_pipes_does_not_hang_the_call(self, engine):
+        started = time.monotonic()
+        engine._run_safe("(sleep 30 &) ; echo done", 60, True, True)
+        assert time.monotonic() - started < 20
+
+    def test_without_a_listener_nothing_streams(self):
+        engine = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
+        assert engine.output_listener is None
+        assert engine._run_safe("echo plain", 10, True, False) == ("plain", "")
