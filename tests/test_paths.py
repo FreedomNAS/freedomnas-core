@@ -31,7 +31,10 @@ def test_the_root_is_found_from_the_installed_file(tmp_path, root):
 
     assert paths.INSTALL_ROOT == install_root
     assert paths.profiles_dir() == install_root / "profiles"
-    assert paths.modules_candidates()[0] == install_root / "modules"
+    assert paths.modules_candidates() == [
+        install_root / "core" / "freedomnas" / "modules",
+        install_root / "modules",
+    ]
 
 
 def test_no_profiles_is_reported_not_guessed(tmp_path):

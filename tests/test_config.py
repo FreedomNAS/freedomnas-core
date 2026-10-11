@@ -420,6 +420,24 @@ class TestServiceBoot:
         assert ConfigurationManager(config_path=str(path)).get_service_boot() == {}
 
 
+class TestModuleSections:
+    def test_a_module_section_survives_a_reload(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        ConfigurationManager(config_path=str(path)).set_module_config("containers", {"pool": "tank"})
+        assert ConfigurationManager(config_path=str(path)).get_module_config("containers") == {"pool": "tank"}
+
+    def test_a_module_without_a_section_gets_an_empty_one(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump({"system": {"hostname": "old"}}))
+        assert ConfigurationManager(config_path=str(path)).get_module_config("containers") == {}
+
+    def test_changing_what_was_read_does_not_change_the_configuration(self, tmp_path):
+        mgr = ConfigurationManager(config_path=str(tmp_path / "config.yaml"))
+        mgr.set_module_config("containers", {"apps": ["jellyfin"]})
+        mgr.get_module_config("containers")["apps"].append("immich")
+        assert mgr.get_module_config("containers") == {"apps": ["jellyfin"]}
+
+
 def test_remove_and_rename_root_snapshots(tmp_path):
     from config import ConfigurationManager
     cfg = ConfigurationManager(str(tmp_path / "config.yaml"))

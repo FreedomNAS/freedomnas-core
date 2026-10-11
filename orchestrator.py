@@ -114,6 +114,16 @@ class FreedomNASModule(ABC):
         healthy = self.health_check()
         return healthy, "" if healthy else "health check failed"
 
+    def reconcile(self, desired: dict, mode: str = "declarative") -> list:
+        """
+        Bring what the module manages to `desired`, its section of the
+        configuration (`modules.<id>`), at boot and when a configuration is
+        restored; in "additive" mode nothing is removed. Returns the
+        reconciler's ActionResults. Modules that manage nothing of their own
+        keep this default.
+        """
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator

@@ -5,12 +5,15 @@ Behaviour of the ReconciliationEngine. White-box: it reaches into
 
 import pytest
 
+import reconcile
 from reconcile import (
+    ActionResult,
     Change,
     CommandExecutionError,
     CommandTranslationError,
     ReconcileMode,
     ReconciliationEngine,
+    ModuleLoaderException,
     parse_mode,
 )
 
@@ -848,3 +851,64 @@ def test_without_an_administrator_no_admin_group_is_looked_up(monkeypatch):
     monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: looked.append(1) or ["docker"])
     diff({"users": [{"username": "luca", "groups": []}]}, {"users": [{"username": "luca", "groups": []}]})
     assert looked == []
+
+
+# ---------------------------------------------------------------------------
+# modules — each module reconciles its own section
+# ---------------------------------------------------------------------------
+
+class RecordingModule:
+    def __init__(self, name, fail=False):
+        self.name = name
+        self.fail = fail
+        self.seen = None
+
+    def reconcile(self, desired, mode):
+        if self.fail:
+            raise RuntimeError("broken")
+        self.seen = (desired, mode)
+        return [ActionResult(action=f"{self.name}.done", params={}, target_state="applied")]
+
+
+def with_modules(monkeypatch, *modules, error=None):
+    class Loader:
+        def __init__(self, engine, config):
+            if error:
+                raise ModuleLoaderException(error)
+
+        def instances(self):
+            return [({"id": m.name}, m) for m in modules]
+
+    monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
+
+
+def test_modules_get_their_own_section_after_everything_else(monkeypatch):
+    apps, quiet = RecordingModule("containers"), RecordingModule("other")
+    with_modules(monkeypatch, apps, quiet)
+    engine = FakeEngine(users={"sarah": ["sudo"]}, hostname="old")
+    config = FakeConfig({"system": {"hostname": "nas"}, "users": [ADMIN],
+                         "modules": {"containers": {"apps": ["jellyfin"]}}})
+    results = reconciler(engine, config).reconcile(mode="additive")
+    assert action_names(results) == ["system.hostname_set", "containers.done", "other.done"]
+    assert apps.seen == ({"apps": ["jellyfin"]}, "additive")
+    assert quiet.seen == ({}, "additive")
+
+
+def test_a_failing_module_is_reported_and_the_others_still_run(monkeypatch):
+    with_modules(monkeypatch, RecordingModule("broken", fail=True), RecordingModule("fine"))
+    results = reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile()
+    assert [(r.action, r.target_state) for r in results] == [
+        ("modules.broken", "failed"), ("fine.done", "applied")]
+
+
+def test_modules_that_cannot_be_loaded_are_one_failure(monkeypatch):
+    with_modules(monkeypatch, error="no modules")
+    results = reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile()
+    assert [(r.action, r.target_state) for r in results] == [("modules", "failed")]
+
+
+def test_a_dry_run_leaves_the_modules_alone(monkeypatch):
+    module = RecordingModule("containers")
+    with_modules(monkeypatch, module)
+    reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile(dry_run=True)
+    assert module.seen is None

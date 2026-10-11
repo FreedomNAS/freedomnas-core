@@ -32,6 +32,7 @@ try:
     from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas.package_manager import admin_groups_present
     from freedomnas import netconfig, netnames, usershares, wireguard
+    from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
     from engine import (  # type: ignore[no-redef]
         FreedomNASEngine,
@@ -45,6 +46,7 @@ except ImportError:
     import netnames  # type: ignore[no-redef]
     import wireguard  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
+    from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
 
@@ -121,7 +123,8 @@ class ReconciliationEngine:
                    partial desired-state file from the command line.
 
     Order: hostname → timezone → network interfaces → pools → users → services → SSH → SMB shares
-    → NFS exports → removal of users. Pools come before the shares on them,
+    → NFS exports → removal of users → modules (each module's own
+    `modules.<id>` section, through its reconcile()). Pools come before the shares on them,
     users before the shares that name them, and users go last so no share
     still refers to them.
 
@@ -171,7 +174,10 @@ class ReconciliationEngine:
                 ActionResult(action=c.path, params={"change": c.change_type}, target_state="planned")
                 for c in changes
             ]
-        return self._apply_changes(changes)
+        results = self._apply_changes(changes)
+        desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
+        results.extend(self._reconcile_modules(desired.get("modules") or {}, parse_mode(mode)))
+        return results
 
     def plan(self, desired_path: Optional[str] = None, mode: str = "declarative") -> List[Change]:
         desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
@@ -512,6 +518,23 @@ class ReconciliationEngine:
                 else:
                     results.append(self._do_nfs_share_create(change.new_value))
 
+        return results
+
+    def _reconcile_modules(self, sections: dict, mode: ReconcileMode) -> List[ActionResult]:
+        try:
+            pairs = ModuleLoader(self.engine, self.config).instances()
+        except ModuleLoaderException as exc:
+            logger.error("Modules not reconciled: %s", exc)
+            return [ActionResult(action="modules", params={}, target_state="failed", error=str(exc))]
+        results: List[ActionResult] = []
+        for manifest, module in pairs:
+            module_id = manifest.get("id", module.name)
+            try:
+                results.extend(module.reconcile(sections.get(module_id) or {}, mode.value) or [])
+            except Exception as exc:
+                logger.error("Module %s failed to reconcile: %s", module_id, exc)
+                results.append(ActionResult(
+                    action=f"modules.{module_id}", params={}, target_state="failed", error=str(exc)))
         return results
 
     # ------------------------------------------------------------------

@@ -1,13 +1,17 @@
 """
 FreedomNAS Module Loader — manifest-driven discovery and registration.
 
-Scans a modules directory for `<name>/manifest.json` entries, loads each
+Scans the modules directories for `<name>/manifest.json` entries, loads each
 module's entry-point class straight from its file path (not through Python's
 package import machinery), and registers it with the Orchestrator. Loading
 by file path means a module works identically whether it ships inside this
 repo (dev) or was dropped into /usr/lib/freedomnas/modules/<name>/ by its own
 package (system install, or a separately-packaged community module) — none
 of that has to be an importable Python package.
+
+The core modules live inside the core (<root>/core/freedomnas/modules) and
+community modules beside it (<root>/modules): both are scanned, core first,
+and a community module cannot take the id of a core one.
 
 manifest.json fields used here:
     id            str  — must match the containing directory name
@@ -49,40 +53,42 @@ class ModuleLoader:
     def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager, modules_dir: Optional[str] = None):
         self._engine = engine
         self._config = config
-        self.modules_dir = Path(modules_dir or self._get_default_modules_dir())
+        self.modules_dirs = [Path(modules_dir)] if modules_dir else self._get_default_modules_dirs()
 
     @staticmethod
-    def _get_default_modules_dir() -> str:
-        """
-        Mirrors FreedomNASEngine._get_default_profile_dir(): try the system
-        install location first, then dev-tree fallbacks.
-        """
-        possible_paths = paths.modules_candidates()
-        for path in possible_paths:
-            if path.exists() and path.is_dir():
-                logger.debug("Using modules directory: %s", path)
-                return str(path)
-        raise ModuleLoaderException(
-            f"Could not find modules directory. Searched: "
-            f"{', '.join(str(p) for p in possible_paths)}"
-        )
+    def _get_default_modules_dirs() -> List[Path]:
+        found = [p for p in paths.modules_candidates() if p.is_dir()]
+        if not found:
+            raise ModuleLoaderException(
+                f"Could not find modules directory. Searched: "
+                f"{', '.join(str(p) for p in paths.modules_candidates())}"
+            )
+        logger.debug("Using modules directories: %s", ", ".join(map(str, found)))
+        return found
 
     def discover(self) -> List[dict]:
-        """Return the parsed manifest.json of every module directory found, in sorted order."""
+        """Return the parsed manifest.json of every module directory found, core modules first."""
         manifests = []
-        for entry in sorted(self.modules_dir.iterdir()):
-            if not entry.is_dir() or entry.name.startswith(("_", ".")):
-                continue  # e.g. modules/_template/ — scaffolding, never a real module
-            manifest_path = entry / "manifest.json"
-            if not manifest_path.exists():
-                continue
-            try:
-                with open(manifest_path, "r") as f:
-                    manifest = json.load(f)
-            except json.JSONDecodeError as exc:
-                raise ModuleLoaderException(f"Invalid JSON in {manifest_path}: {exc}")
-            manifest["_dir"] = entry
-            manifests.append(manifest)
+        seen = set()
+        for base in self.modules_dirs:
+            for entry in sorted(base.iterdir()):
+                if not entry.is_dir() or entry.name.startswith(("_", ".")):
+                    continue
+                manifest_path = entry / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    with open(manifest_path, "r") as f:
+                        manifest = json.load(f)
+                except json.JSONDecodeError as exc:
+                    raise ModuleLoaderException(f"Invalid JSON in {manifest_path}: {exc}")
+                module_id = manifest.get("id", entry.name)
+                if module_id in seen:
+                    logger.warning("Module '%s' in %s ignored: the id is already taken", module_id, base)
+                    continue
+                seen.add(module_id)
+                manifest["_dir"] = entry
+                manifests.append(manifest)
         return manifests
 
     def _load_class(self, module_dir: Path, entry_point: str):

@@ -48,8 +48,8 @@ def profiles_dir() -> Optional[Path]:
 
 def modules_candidates() -> List[Path]:
     return [
-        INSTALL_ROOT / "modules",
         _HERE / "modules",
+        INSTALL_ROOT / "modules",
     ]
 
 

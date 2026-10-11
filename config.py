@@ -89,6 +89,7 @@ class ConfigurationManager:
         "services": {
             "boot": {},
         },
+        "modules": {},
     }
     
     def __init__(self, config_path: Optional[str] = None):
@@ -764,6 +765,17 @@ class ConfigurationManager:
         boot = services.get("boot") or {}
         boot[name] = bool(enabled)
         services["boot"] = boot
+        self.save()
+
+    def get_module_config(self, module_id: str) -> Dict[str, Any]:
+        """A community module's own section of the configuration"""
+        return copy.deepcopy((self.config.get("modules") or {}).get(module_id) or {})
+
+    def set_module_config(self, module_id: str, section: Dict[str, Any]) -> None:
+        """Replace a community module's section of the configuration"""
+        modules = self.config.get("modules") or {}
+        modules[module_id] = copy.deepcopy(section)
+        self.config["modules"] = modules
         self.save()
 
     # Updates configuration methods
