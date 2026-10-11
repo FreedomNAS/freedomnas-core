@@ -28,14 +28,17 @@ class FakeConfig:
 
 
 class FakeEngine:
-    def __init__(self, state="", missing=False, failing=()):
+    def __init__(self, state="", missing=False, failing=(), kernel=""):
         self.state = state
+        self.kernel = kernel
         self.missing = missing
         self.failing = set(failing)
         self.calls = []
 
     def execute(self, category, action, timeout=30, **kwargs):
         self.calls.append((action, kwargs))
+        if action == "kernel_installed" and self.kernel:
+            return self.kernel + "\n", ""
         if self.missing and category == "bootloader":
             raise CommandTranslationError(f"Command not found: {category}.{action}")
         if action in self.failing:
@@ -99,3 +102,23 @@ def test_only_a_failed_root_dataset_is_ever_destroyed():
     engine = FakeEngine(ROLLED_BACK.replace("debian-failed-20261009-101500", "debian"))
     assert forget(engine, destroy_failed=True) is None
     assert [a for a, _ in engine.calls] == ["boot_state", "rollback_forget"]
+
+
+def test_a_new_kernel_in_the_active_uki_needs_a_reboot(monkeypatch):
+    monkeypatch.setattr("os.uname", lambda: type("u", (), {"release": "6.18.54-3-freedomnas"})())
+    report = summary(FakeEngine("state: trial\nactive-kernel: 6.18.60-1-freedomnas\n"), FakeConfig())
+    assert report["kernel"] == {"running": "6.18.54-3-freedomnas", "installed": "6.18.60-1-freedomnas"}
+    assert report["reboot_needed"] is True
+    report = summary(FakeEngine("state: ok\nactive-kernel: 6.18.54-3-freedomnas\n"), FakeConfig())
+    assert report["reboot_needed"] is False
+
+
+def test_without_a_uki_the_installed_kernel_comes_from_the_profile(monkeypatch):
+    monkeypatch.setattr("os.uname", lambda: type("u", (), {"release": "15.1-RELEASE"})())
+    report = summary(FakeEngine(missing=True, kernel="15.1-RELEASE-p2"), FakeConfig())
+    assert report["supported"] is False and report["reboot_needed"] is True
+
+
+def test_an_unknown_installed_kernel_never_asks_for_a_reboot():
+    assert summary(FakeEngine(missing=True), FakeConfig())["reboot_needed"] is False
+    assert summary(FakeEngine("state: ok\n"), FakeConfig())["reboot_needed"] is False

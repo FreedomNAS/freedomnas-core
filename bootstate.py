@@ -6,9 +6,13 @@ in the zz-dracut-uki hook, which keep their state in boot.state on the ESP.
 From here the system confirms that it booted, turns the rollback on or off,
 reports what happened, and clears the record once the administrator has
 seen it. Editions without a UKI (FreeBSD) have none of these commands.
+
+It also tells whether the system must reboot: the kernel it would boot
+(the active UKI's, or FreeBSD's /boot/kernel) is not the one running.
 """
 
 import logging
+import os
 import re
 from typing import Dict, Optional
 
@@ -60,13 +64,27 @@ def read_state(engine) -> Optional[Dict[str, str]]:
     return state
 
 
+def installed_kernel(engine, state: Optional[Dict[str, str]]) -> str:
+    if state is not None:
+        return state.get("active-kernel", "")
+    try:
+        out, _ = engine.execute("bootloader", "kernel_installed")
+    except (CommandTranslationError, CommandExecutionError):
+        return ""
+    return out.strip()
+
+
 def summary(engine, config) -> Dict[str, object]:
     state = read_state(engine)
+    running = os.uname().release
+    installed = installed_kernel(engine, state)
     result = {
         "supported": state is not None,
         "autorollback": autorollback_enabled(config),
         "state": (state or {}).get("state", "ok"),
         "rollback": None,
+        "kernel": {"running": running, "installed": installed},
+        "reboot_needed": bool(installed) and installed != running,
     }
     if state and state.get("date") and state.get("failed-kernel"):
         dataset = state.get("failed-dataset", "")
