@@ -1,3 +1,14 @@
+freedomnas-core (0.9.12-1) unstable; urgency=medium
+
+  * Automatic rollback of a kernel update that does not boot: boot
+    confirmation and the rollback report for the WebUI
+  * Command output streamed while it runs, for the verbose installer
+  * Administrators get the groups their features need on every reconcile
+  * Pool import reads account names out of Samba's Unix User ACL form
+  * An installation's pending setup told apart from an image's
+
+ -- FreedomNAS Team <dev@freedomnas.io>  Sun, 11 Oct 2026 00:18:58 +0000
+
 freedomnas-core (0.9.11-1) unstable; urgency=medium
 
   * Advanced networking: interface settings applied under a checkpoint that
