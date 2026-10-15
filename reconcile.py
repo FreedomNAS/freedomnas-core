@@ -31,7 +31,7 @@ try:
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas.package_manager import admin_groups_present
-    from freedomnas import netconfig, netnames, usershares, wireguard
+    from freedomnas import netconfig, netnames, shadow, usershares, wireguard
     from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
     from engine import (  # type: ignore[no-redef]
@@ -44,6 +44,7 @@ except ImportError:
     from package_manager import admin_groups_present  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
     import netnames  # type: ignore[no-redef]
+    import shadow  # type: ignore[no-redef]
     import wireguard  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
     from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore[no-redef]
@@ -556,6 +557,12 @@ class ReconciliationEngine:
         """
         results: List[ActionResult] = []
         renamed: Dict[str, str] = {}
+        reapply = self._network_reapply()
+        for name in (reapply or {}).get("forget") or []:
+            self.engine.execute("network", "connection_forget", check=False, interface=name)
+            logger.info("Interface %s forgotten: the network of this machine has none", name)
+            results.append(ActionResult(action="network.forget", params={"interface": name},
+                                        target_state="applied"))
         try:
             done, renamed = netnames.apply(self.engine, self.config)
             for line in done:
@@ -579,7 +586,7 @@ class ReconciliationEngine:
                 results.append(self._do_wireguard(entry))
                 continue
             if entry.get("type") in netconfig.VIRTUAL_TYPES:
-                results.append(self._do_virtual(entry, links))
+                results.append(self._do_virtual(entry, links, bool(reapply)))
                 continue
             if entry.get("master"):
                 continue
@@ -589,8 +596,33 @@ class ReconciliationEngine:
                 results.append(ActionResult(action="network.interface", params={"interface": name},
                                             target_state="skipped", error="not on this system"))
                 continue
-            results.append(self._do_interface(name, entry["config"], name in renamed.values()))
+            results.append(self._do_interface(name, entry["config"], name in renamed.values(),
+                                              bool(reapply)))
+        if reapply is not None:
+            self._network_reapply_done()
         return results
+
+    def _network_marker(self):
+        path = getattr(self.config, "config_path", None)
+        return path.parent / shadow.NETWORK_MARKER if path else None
+
+    def _network_reapply(self) -> Optional[dict]:
+        """What the boot left when it took the network of this machine from a data pool."""
+        marker = self._network_marker()
+        if not marker or not marker.is_file():
+            return None
+        try:
+            with open(marker) as f:
+                return yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning("Could not read %s: %s", marker, exc)
+            return {}
+
+    def _network_reapply_done(self) -> None:
+        try:
+            self._network_marker().unlink()
+        except OSError as exc:
+            logger.warning("Could not remove the network marker: %s", exc)
 
     def _do_wireguard(self, entry: dict) -> ActionResult:
         params = {"interface": entry["logical_name"], "type": "wireguard"}
@@ -607,7 +639,7 @@ class ReconciliationEngine:
                                 error=str(exc))
         return ActionResult(action="network.wireguard", params=params, target_state="applied")
 
-    def _do_virtual(self, entry: dict, links: List[str]) -> ActionResult:
+    def _do_virtual(self, entry: dict, links: List[str], reapply: bool = False) -> ActionResult:
         name = entry["logical_name"]
         params = {"interface": name, "type": entry["type"]}
         missing = [p for p in (entry.get("ports") or []) + ([entry["parent"]] if entry.get("parent") else [])
@@ -617,8 +649,12 @@ class ReconciliationEngine:
                                 error=f"{', '.join(missing)} not on this system")
         try:
             if netconfig.is_configured(self.engine, name):
-                return ActionResult(action="network.virtual", params=params, target_state="skipped",
-                                    error="already configured")
+                if not reapply:
+                    return ActionResult(action="network.virtual", params=params, target_state="skipped",
+                                        error="already configured")
+                netconfig.run(self.engine, netconfig.virtual_steps(entry, create=False))
+                logger.info("%s %s configured again", entry["type"], name)
+                return ActionResult(action="network.virtual", params=params, target_state="applied")
             netconfig.run(self.engine, netconfig.virtual_steps(entry))
         except (CommandExecutionError, CommandTranslationError, KeyError, ValueError) as exc:
             logger.error("Failed to create %s %s: %s", entry["type"], name, exc)
@@ -628,15 +664,17 @@ class ReconciliationEngine:
         logger.info("%s %s created", entry["type"], name)
         return ActionResult(action="network.virtual", params=params, target_state="applied")
 
-    def _do_interface(self, name: str, config: dict, renamed: bool = False) -> ActionResult:
+    def _do_interface(self, name: str, config: dict, renamed: bool = False,
+                      reapply: bool = False) -> ActionResult:
         """
         Only an interface the system holds no FreedomNAS configuration for:
         after a reflash or on new hardware. A configured one is left alone, so
-        a boot never takes the network down to re-apply what is already there.
+        a boot never takes the network down to re-apply what is already there,
+        unless this boot took the network of the machine from a data pool.
         """
         params = {"interface": name}
         try:
-            if netconfig.is_configured(self.engine, name):
+            if netconfig.is_configured(self.engine, name) and not reapply:
                 if not renamed:
                     return ActionResult(action="network.interface", params=params, target_state="skipped",
                                         error="already configured")

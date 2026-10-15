@@ -4,6 +4,7 @@ Behaviour of the ReconciliationEngine. White-box: it reaches into
 """
 
 import pytest
+import yaml
 
 import reconcile
 from reconcile import (
@@ -810,6 +811,39 @@ def test_a_bridge_whose_port_is_missing_is_skipped():
     engine = _with_links(FakeEngine(), '[{"ifname": "fnas_lan2"}]')
     [result] = reconciler(engine)._do_network([BRIDGE])
     assert result.target_state == "skipped" and "fnas_lan1" in result.error
+
+
+def _configured(engine):
+    plain = engine.execute
+    engine.execute = lambda c, a, **k: (
+        (engine.calls.append((c, a, k)) or ("yes\n", "")) if a == "connection_exists" else plain(c, a, **k))
+    return engine
+
+
+def _marked(tmp_path, forget=()):
+    config = FakeConfig()
+    config.config_path = tmp_path / "config.yaml"
+    (tmp_path / "network-reapply").write_text(yaml.safe_dump({"source": "tank", "forget": list(forget)}))
+    return config
+
+
+def test_a_network_taken_from_the_data_pool_is_applied_over_the_old_one(tmp_path):
+    engine = _configured(_with_links(FakeEngine(), '[{"ifname": "eth0"}]'))
+    config = _marked(tmp_path, forget=["fnas_lan3"])
+    [forget, result] = reconciler(engine, config)._do_network([LAN])
+    assert (forget.action, forget.params) == ("network.forget", {"interface": "fnas_lan3"})
+    assert result.target_state == "applied"
+    actions = [a for c, a, _ in engine.calls if c == "network" and a not in ("list_physical", "list_interfaces")]
+    assert actions[0] == "connection_forget" and "ipv4_static" in actions
+    assert not (tmp_path / "network-reapply").exists()
+
+
+def test_an_existing_bridge_gets_the_taken_network_again(tmp_path):
+    engine = _configured(_with_links(FakeEngine(), '[{"ifname": "fnas_lan1"}]'))
+    [result] = reconciler(engine, _marked(tmp_path))._do_network([BRIDGE, PORT])
+    assert result.target_state == "applied"
+    actions = [a for c, a, _ in engine.calls if c == "network"]
+    assert "bridge_create" not in actions and "bridge_port_add" in actions
 
 
 def test_a_missing_wireguard_is_set_up_again():

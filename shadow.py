@@ -6,7 +6,7 @@ matter, and they are not equal:
 
   * The internal one, `<root pool>/.freedomnas`, mounted at
     <config_dir>/state. It belongs to this install and is the truth about
-    it: who administers it, its edition, its network, its services.
+    it: who administers it, its edition, its services.
 
   * The external ones, `<data pool>/.freedomnas`, one on every other pool
     that carries the dataset. When the disk that holds the root pool dies,
@@ -17,11 +17,21 @@ matter, and they are not equal:
     never compete with the internal one for the state directory.
 
 Every save stamps `system.saved_at`, and a copy on a data pool carries the
-stamp of the save it mirrors. At boot, an external copy newer than the
-internal one was written by another install sharing the pool — another
-edition on another disk of the same machine — and only what belongs to the
-pool is taken from it: shares, snapshot policies, modules, pools, the list
-of users. What belongs to this install is never overwritten from outside.
+stamp of the save it mirrors. At boot, what belongs to the pools is taken
+from the newest external copy, whichever install wrote it and however old
+it is next to the internal one: shares, snapshot policies, modules, pools,
+and users this install does not have. What belongs to this install — its
+users' roles and IDs, its edition, its services — is never overwritten
+from outside.
+
+The network and the hostname belong to the machine, not to the install: the
+cards are known by their MAC addresses. An external copy that knows a card
+of this machine gives them, whichever install wrote it last, so every
+edition booted on the same box comes up with the same addresses. A copy
+that knows none of the cards here was written on another machine, which
+may still be running with those addresses: an install that has a network
+of its own keeps it. When the network is taken, the reconciler applies it
+again at that boot, also to interfaces already configured.
 
 The internal dataset carries org.freedomnas:role=internal. A pool that is
 another install's root — that property on its `.freedomnas`, or a bootfs —
@@ -40,11 +50,12 @@ import yaml
 
 try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
-    from freedomnas import paths
+    from freedomnas import netnames, paths
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.package_manager import admin_groups_present
 except ImportError:  # running from the repository, not from the package
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore
+    import netnames  # type: ignore
     import paths  # type: ignore
     from config import ConfigurationManager, known_admin_groups, normalize_user  # type: ignore
     from package_manager import admin_groups_present  # type: ignore
@@ -54,6 +65,7 @@ logger = logging.getLogger("FreedomNAS.Shadow")
 DATASET_NAME = ".freedomnas"
 CONFIG_NAME = "config.yaml"
 ROLE_PROPERTY = "org.freedomnas:role"
+NETWORK_MARKER = "network-reapply"
 
 _ERRORS = (CommandExecutionError, CommandTranslationError)
 
@@ -365,6 +377,64 @@ def merge_shared(local: Dict, external: Dict, admin_extra: Optional[List[str]] =
     return merged
 
 
+def known_macs(config: Dict) -> set:
+    network = config.get("network") or {}
+    macs = {str(mac).lower() for mac in network.get("interfaces_mapping") or {}}
+    macs |= {str(i["mac_address"]).lower() for i in network.get("interfaces") or []
+             if isinstance(i, dict) and i.get("mac_address")}
+    return macs
+
+
+def take_network(local: Dict, external: Dict) -> Dict:
+    """`local` with the network and the hostname of `external`."""
+    taken = copy.deepcopy(local)
+    taken["network"] = copy.deepcopy(external.get("network") or {})
+    hostname = (external.get("system") or {}).get("hostname")
+    if hostname:
+        taken.setdefault("system", {})["hostname"] = hostname
+    return taken
+
+
+def _machine(config: Dict):
+    return config.get("network") or {}, (config.get("system") or {}).get("hostname")
+
+
+def _present_macs(engine) -> set:
+    try:
+        stdout, _ = engine.execute("network", "list_physical", check=False)
+    except _ERRORS as exc:
+        logger.warning("Could not list the network cards: %s", exc)
+        return set()
+    return {card["mac"] for card in netnames.parse_physical(stdout)}
+
+
+def _take_network(engine, config_path: Path, externals: List) -> Optional[str]:
+    """
+    The network of the newest external copy that knows a card of this
+    machine, when it differs from the one here. Interfaces this install had
+    and that copy has not are listed for the reconciler to forget.
+    """
+    present = _present_macs(engine)
+    source = next(((pool, data) for pool, data in externals if known_macs(data) & present), None)
+    if not source:
+        return None
+    pool, data = source
+    current = _load(config_path)
+    wanted = take_network(current, data)
+    if _machine(wanted) == _machine(current):
+        return None
+    names = {i.get("logical_name") for i in (wanted.get("network") or {}).get("interfaces") or []
+             if isinstance(i, dict)}
+    forget = [i["logical_name"] for i in (current.get("network") or {}).get("interfaces") or []
+              if isinstance(i, dict) and i.get("logical_name") and i["logical_name"] not in names
+              and i.get("type") != "wireguard"]
+    _write(config_path, wanted)
+    with open(config_path.parent / NETWORK_MARKER, "w") as f:
+        yaml.safe_dump({"source": pool, "forget": forget}, f)
+    logger.info("Took the network of this machine from %s", pool)
+    return pool
+
+
 def boot(engine) -> Dict:
     """
     At every boot, once the pools are imported: put the internal dataset in
@@ -372,8 +442,8 @@ def boot(engine) -> Dict:
 
     action is one of
       local    — the internal configuration, as it is
-      merged   — the internal configuration, with the shared sections of a
-                 newer external copy
+      merged   — the internal configuration, with the shared sections of the
+                 newest external copy
       restored — no initialized internal configuration: the newest external
                  one was copied in (a reinstall)
       none     — nothing anywhere: the setup wizard runs
@@ -403,12 +473,16 @@ def boot(engine) -> Dict:
     result = {"internal": internal, "action": "none", "source": None, "keep": []}
     if _initialized(local):
         result["action"] = "local"
-        newer = [e for e in externals if _saved_at(e[1]) > _saved_at(local)]
-        if newer:
-            pool, data = newer[0]
-            _write(config_path, merge_shared(local, data, _admin_extra(engine)))
-            result.update(action="merged", source=pool)
-            logger.info("Took the shared sections from %s: another install wrote them there", pool)
+        if externals:
+            pool, data = externals[0]
+            merged = merge_shared(local, data, _admin_extra(engine))
+            if merged != local:
+                _write(config_path, merged)
+                result.update(action="merged", source=pool)
+                logger.info("Took the shared sections from %s", pool)
+        network = _take_network(engine, config_path, externals)
+        if network:
+            result["network"] = network
     elif externals:
         pool, _ = externals[0]
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:

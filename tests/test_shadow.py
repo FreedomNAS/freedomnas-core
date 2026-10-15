@@ -33,6 +33,7 @@ class Zfs:
         self.destroyed = []
         self.bootfs = {}
         self.passwd = {}
+        self.cards = []
         self.profile = {"paths": {"config_dir": str(tmp_path)}}
         if active:
             self._mount_state(active)
@@ -106,6 +107,8 @@ class Zfs:
             assert kw["dataset"] == self.active
             self._unmount_state()
             return "", ""
+        if action == "list_physical":
+            return "".join(f"{name} {mac} e1000e\n" for name, mac in self.cards), ""
         if action == "group_exists":
             return "", ""
         if action == "dataset_destroy":
@@ -229,10 +232,26 @@ def test_another_installs_newer_copy_brings_only_what_belongs_to_the_pool(tmp_pa
     assert merged["system"]["saved_at"] > debian["system"]["saved_at"]
 
 
-def test_an_older_copy_changes_nothing(tmp_path):
-    old = {**GENTOO, "system": system("2026-10-14T08:00:00+00:00"), "shares": {"smb": [], "nfs": []}}
+def test_an_older_copy_still_brings_what_belongs_to_the_pool(tmp_path):
+    old = {**GENTOO, "system": system("2026-10-14T08:00:00+00:00"),
+           "shares": {"smb": [{"name": "foto"}, {"name": "documenti"}], "nfs": []},
+           "storage": {"pools": [{"name": "tank"}]},
+           "users": GENTOO["users"] + [{"username": "luca", "groups": [], "uid": 1003}]}
     zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
                                   "tank/.freedomnas": {"config.yaml": dump(old)}})
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("merged", "tank")
+    merged = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert [s["name"] for s in merged["shares"]["smb"]] == ["foto", "documenti"]
+    assert [p["name"] for p in merged["storage"]["pools"]] == ["mainpool", "tank"]
+    assert [(u["username"], u["admin"]) for u in merged["users"]] == [("sarah", True), ("luca", False)]
+
+
+def test_a_copy_with_nothing_new_changes_nothing(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+                                  "tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
     before = zfs.datasets["rpool/.freedomnas"]["files"]["config.yaml"]
 
     assert shadow.boot(zfs)["action"] == "local"
@@ -344,3 +363,89 @@ def test_a_restored_user_who_exists_here_keeps_this_systems_ids(tmp_path):
 
     sarah = yaml.safe_load((zfs.state / "config.yaml").read_text())["users"][0]
     assert (sarah["uid"], sarah["gid"]) == (1000, 1000)
+
+
+BOX = {
+    "system": system("2026-10-13T10:00:00+00:00", hostname="box", edition="artix"),
+    "users": [{"username": "sarah", "groups": [], "admin": True, "uid": 1001}],
+    "shares": {"smb": [], "nfs": []},
+    "storage": {"pools": [{"name": "tank"}]},
+    "network": {
+        "interfaces": [
+            {"logical_name": "fnas_lan2", "mac_address": "1c:86:0b:32:98:ae", "master": "fnas_bridge1"},
+            {"logical_name": "fnas_bridge1", "type": "bridge", "ports": ["fnas_lan2"],
+             "config": {"method": "static", "ip": "192.168.1.200", "cidr": 24}},
+        ],
+        "interfaces_mapping": {"1c:86:0b:32:98:ae": "fnas_lan2", "00:1e:4f:aa:bb:cc": "fnas_lan1"},
+    },
+}
+
+DEBIAN_VM = {
+    "system": system("2026-10-15T09:15:00+00:00", hostname="debian-vm", edition="debian"),
+    "users": [{"username": "sarah", "groups": ["docker"], "admin": True, "uid": 1000}],
+    "shares": {"smb": [], "nfs": []},
+    "storage": {"pools": []},
+    "network": {
+        "interfaces": [{"logical_name": "fnas_lan1", "mac_address": "52:54:00:fa:80:01",
+                        "config": {"method": "dhcp"}},
+                       {"logical_name": "fnas_lan3", "config": {"method": "dhcp"}}],
+        "interfaces_mapping": {"52:54:00:fa:80:01": "fnas_lan1"},
+    },
+}
+
+
+def test_the_machines_network_comes_from_the_data_pool_even_when_older(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(DEBIAN_VM)},
+                                  "tank/.freedomnas": {"config.yaml": dump(BOX)}})
+    zfs.cards = [("enp3s0", "1c:86:0b:32:98:ae"), ("enp0s25", "00:1e:4f:aa:bb:cc")]
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["network"]) == ("merged", "tank")
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert config["network"] == BOX["network"]
+    assert config["system"]["hostname"] == "box"
+    assert config["users"] == DEBIAN_VM["users"]
+    marker = yaml.safe_load((zfs.state / shadow.NETWORK_MARKER).read_text())
+    assert marker == {"source": "tank", "forget": ["fnas_lan1", "fnas_lan3"]}
+
+
+def test_a_copy_from_another_machine_leaves_the_network_alone(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(DEBIAN_VM)},
+                                  "tank/.freedomnas": {"config.yaml": dump(BOX)}})
+    zfs.cards = [("enp1s0", "52:54:00:fa:80:01")]
+
+    result = shadow.boot(zfs)
+
+    assert "network" not in result
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert config["network"] == DEBIAN_VM["network"]
+    assert config["system"]["hostname"] == "debian-vm"
+    assert not (zfs.state / shadow.NETWORK_MARKER).exists()
+
+
+def test_the_same_network_is_not_taken_twice(tmp_path):
+    same = {**DEBIAN_VM, "network": BOX["network"], "system": {**DEBIAN_VM["system"], "hostname": "box"}}
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(same)},
+                                  "tank/.freedomnas": {"config.yaml": dump(BOX)}})
+    zfs.cards = [("fnas_lan2", "1c:86:0b:32:98:ae")]
+
+    assert "network" not in shadow.boot(zfs)
+    assert not (zfs.state / shadow.NETWORK_MARKER).exists()
+
+
+def test_the_newest_copy_that_knows_this_machine_gives_the_network(tmp_path):
+    elsewhere = {**BOX, "system": system("2026-10-15T12:00:00+00:00", hostname="elsewhere"),
+                 "network": {"interfaces": [], "interfaces_mapping": {"aa:bb:cc:dd:ee:ff": "fnas_lan1"}}}
+    zfs = Zfs(tmp_path, pools=("rpool", "tank", "backup"),
+              datasets={"rpool/.freedomnas": {"config.yaml": dump(DEBIAN_VM)},
+                        "tank/.freedomnas": {"config.yaml": dump(BOX)},
+                        "backup/.freedomnas": {"config.yaml": dump(elsewhere)}})
+    zfs.cards = [("enp3s0", "1c:86:0b:32:98:ae")]
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"], result["network"]) == ("merged", "backup", "tank")
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert config["system"]["hostname"] == "box"
+    assert config["network"] == BOX["network"]
