@@ -31,6 +31,8 @@ class Zfs:
         self.mounted_at = {}
         self.fail_mount = set()
         self.destroyed = []
+        self.bootfs = {}
+        self.passwd = {}
         self.profile = {"paths": {"config_dir": str(tmp_path)}}
         if active:
             self._mount_state(active)
@@ -67,9 +69,17 @@ class Zfs:
             self.datasets[name] = {"mountpoint": str(self.state), "files": {}}
             return "", ""
         if action == "dataset_get_property":
-            return f"{self.datasets[kw['dataset']]['mountpoint']}\tlocal\n", ""
+            value = self.datasets[kw["dataset"]].get(kw["property"], "-")
+            return f"{value}\tlocal\n", ""
+        if action == "pool_get_all":
+            return f"bootfs\t{self.bootfs.get(kw['pool_name'], '-')}\tdefault\n", ""
+        if action == "get_user_info":
+            entry = self.passwd.get(kw["username"])
+            return (f"{kw['username']}:x:{entry[0]}:{entry[1]}::/home/{kw['username']}:/bin/sh\n"
+                    if entry else ""), ""
         if action == "dataset_set":
-            assert kw["dataset"] != self.active, "moved the mountpoint of the dataset in use"
+            assert kw["property"] != "mountpoint" or kw["dataset"] != self.active, \
+                "moved the mountpoint of the dataset in use"
             self.datasets[kw["dataset"]][kw["property"]] = kw["value"]
             return "", ""
         if action == "mount_dataset_at":
@@ -273,3 +283,64 @@ def test_a_root_filesystem_outside_zfs_is_left_alone(tmp_path):
 
     zfs = NoZfsRoot(tmp_path, pools=[])
     assert shadow.boot(zfs) == {"internal": None, "action": "none", "source": None, "keep": []}
+
+
+def test_the_internal_dataset_is_marked_as_such(tmp_path):
+    zfs = Zfs(tmp_path)
+
+    shadow.boot(zfs)
+
+    assert zfs.datasets["rpool/.freedomnas"][shadow.ROLE_PROPERTY] == "internal"
+
+
+def test_another_installs_root_pool_is_never_read_moved_kept_or_written(tmp_path):
+    debian = {**GENTOO, "system": system("2026-10-15T05:15:00+00:00", edition="debian")}
+    zfs = Zfs(tmp_path, pools=("rpool", "poolj", "tank"), datasets={
+        "rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+        "poolj/.freedomnas": {"config.yaml": dump(debian)},
+        "tank/.freedomnas": {"config.yaml": dump(GENTOO)},
+    })
+    zfs.bootfs["poolj"] = "poolj/ROOT/debian"
+
+    result = shadow.boot(zfs)
+    shadow.sync(zfs, str(zfs.state / "config.yaml"))
+    shadow.ensure_dataset(zfs, "poolj")
+
+    assert (result["action"], result["source"]) == ("local", None)
+    assert "poolj" not in result["keep"]
+    assert zfs.datasets["poolj/.freedomnas"]["mountpoint"] == str(zfs.state)
+    assert zfs.config("poolj/.freedomnas")["system"]["edition"] == "debian"
+
+
+def test_a_root_pool_marked_internal_is_foreign_even_without_bootfs(tmp_path):
+    zfs = Zfs(tmp_path, pools=("poolj", "rpool"), datasets={
+        "rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+    })
+    zfs.datasets["rpool/.freedomnas"][shadow.ROLE_PROPERTY] = "internal"
+
+    assert shadow.foreign_root(zfs, "rpool", root="poolj")
+    assert not shadow.foreign_root(zfs, "rpool")
+
+
+def test_pools_with_a_copy_or_a_module_stay_imported(tmp_path):
+    config = {**GENTOO, "storage": {"pools": []},
+              "modules": {"containers": {"pool": "strataos"}}}
+    zfs = Zfs(tmp_path, pools=("rpool", "mainpool", "strataos", "gamespool"), datasets={
+        "rpool/.freedomnas": {"config.yaml": dump(config)},
+        "mainpool/.freedomnas": {"config.yaml": dump(config)},
+    })
+
+    result = shadow.boot(zfs)
+
+    assert result["keep"] == ["mainpool", "strataos"]
+
+
+def test_a_restored_user_who_exists_here_keeps_this_systems_ids(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+    zfs.passwd["sarah"] = (1000, 1000)
+
+    shadow.boot(zfs)
+
+    sarah = yaml.safe_load((zfs.state / "config.yaml").read_text())["users"][0]
+    assert (sarah["uid"], sarah["gid"]) == (1000, 1000)

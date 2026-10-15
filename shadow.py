@@ -22,6 +22,10 @@ internal one was written by another install sharing the pool — another
 edition on another disk of the same machine — and only what belongs to the
 pool is taken from it: shares, snapshot policies, modules, pools, the list
 of users. What belongs to this install is never overwritten from outside.
+
+The internal dataset carries org.freedomnas:role=internal. A pool that is
+another install's root — that property on its `.freedomnas`, or a bootfs —
+is left alone: never read, written, moved or kept imported.
 """
 
 import contextlib
@@ -49,6 +53,7 @@ logger = logging.getLogger("FreedomNAS.Shadow")
 
 DATASET_NAME = ".freedomnas"
 CONFIG_NAME = "config.yaml"
+ROLE_PROPERTY = "org.freedomnas:role"
 
 _ERRORS = (CommandExecutionError, CommandTranslationError)
 
@@ -95,13 +100,43 @@ def active_dataset(engine) -> Optional[str]:
     return name if name.endswith(f"/{DATASET_NAME}") else None
 
 
-def _mountpoint(engine, dataset: str) -> str:
+def _property(engine, dataset: str, name: str) -> str:
     try:
-        stdout, _ = engine.execute("zfs", "dataset_get_property", property="mountpoint",
+        stdout, _ = engine.execute("zfs", "dataset_get_property", property=name,
                                    dataset=dataset, check=False)
     except _ERRORS:
         return ""
     return (stdout.split() or [""])[0]
+
+
+def _mountpoint(engine, dataset: str) -> str:
+    return _property(engine, dataset, "mountpoint")
+
+
+def _bootfs(engine, pool: str) -> str:
+    try:
+        stdout, _ = engine.execute("zfs", "pool_get_all", pool_name=pool, check=False)
+    except _ERRORS:
+        return ""
+    for line in stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[0] == "bootfs":
+            return "" if fields[1] == "-" else fields[1]
+    return ""
+
+
+def foreign_root(engine, pool: str, root: Optional[str] = None) -> bool:
+    """
+    Whether `pool` is the root pool of another install: its `.freedomnas` is
+    that install's truth, not a copy to read from, write to or keep imported.
+    """
+    root = root or root_pool(engine)
+    if pool == root:
+        return False
+    if _bootfs(engine, pool):
+        return True
+    dataset = f"{pool}/{DATASET_NAME}"
+    return _exists(engine, dataset) and _property(engine, dataset, ROLE_PROPERTY) == "internal"
 
 
 def _set_mountpoint(engine, dataset: str, mountpoint: str) -> None:
@@ -127,6 +162,8 @@ def ensure_dataset(engine, pool: str) -> bool:
     configuration from the moment it exists.
     """
     dataset = f"{pool}/{DATASET_NAME}"
+    if foreign_root(engine, pool):
+        return False
     created = False
     if not _exists(engine, dataset):
         engine.execute("zfs", "create_state_dataset", pool_name=pool)
@@ -173,10 +210,11 @@ def sync(engine, config_path: str) -> List[Dict]:
         return []
 
     active = active_dataset(engine)
+    root = root_pool(engine)
     results = []
     for pool in _pools(engine):
         dataset = f"{pool}/{DATASET_NAME}"
-        if dataset == active or not _exists(engine, dataset):
+        if dataset == active or not _exists(engine, dataset) or foreign_root(engine, pool, root):
             continue
         _make_external(engine, dataset)
         results.append(_copy_into(engine, dataset, source))
@@ -277,6 +315,9 @@ def activate(engine, pool: Optional[str] = None, state: Optional[Path] = None) -
             logger.info("%s is now an external copy", current)
         logger.info("The configuration now lives on %s", internal)
 
+    if _property(engine, internal, ROLE_PROPERTY) != "internal":
+        engine.execute("zfs", "dataset_set", property=ROLE_PROPERTY, value="internal", dataset=internal)
+
     if pool and pool != internal.split("/", 1)[0]:
         ensure_dataset(engine, pool)
     return internal
@@ -346,10 +387,12 @@ def boot(engine) -> Dict:
     local = _load(config_path)
 
     externals = []
+    copies = []
     for pool in _pools(engine):
         dataset = f"{pool}/{DATASET_NAME}"
-        if pool == root or not _exists(engine, dataset):
+        if pool == root or not _exists(engine, dataset) or foreign_root(engine, pool, root):
             continue
+        copies.append(pool)
         _make_external(engine, dataset)
         data = _read(engine, dataset)
         if data and _initialized(data):
@@ -371,16 +414,48 @@ def boot(engine) -> Dict:
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
             shutil.copy2(mountpoint / CONFIG_NAME, config_path)
         restored = _load(config_path)
+        changed = _local_ids(engine, restored)
         if (restored.get("system") or {}).get("edition") != engine.os_type:
             restored.setdefault("system", {})["edition"] = engine.os_type
+            changed = True
+        if changed:
             _write(config_path, restored)
         result.update(action="restored", source=pool)
         logger.info("Restored the configuration from %s", pool)
 
-    named = {p.get("name") for p in (_load(config_path).get("storage") or {}).get("pools") or []
+    final = _load(config_path)
+    named = {p.get("name") for p in (final.get("storage") or {}).get("pools") or []
              if isinstance(p, dict)}
-    result["keep"] = [p for p in imported if p != root and (p in named or p == result["source"])]
+    named |= {m.get("pool") for m in (final.get("modules") or {}).values()
+              if isinstance(m, dict) and m.get("pool")}
+    named |= set(copies)
+    result["keep"] = [p for p in imported if p != root and p in named
+                      and not foreign_root(engine, p, root)]
     return result
+
+
+def _local_ids(engine, config: Dict) -> bool:
+    """
+    A restored user who already exists here keeps the IDs this system gave
+    them: the configuration describes the system, not the one it came from.
+    """
+    changed = False
+    for user in config.get("users") or []:
+        if not isinstance(user, dict) or not user.get("username"):
+            continue
+        try:
+            stdout, _ = engine.execute("users", "get_user_info", username=user["username"], check=False)
+        except _ERRORS:
+            continue
+        fields = stdout.strip().split(":")
+        if len(fields) < 4 or not fields[2].isdigit() or not fields[3].isdigit():
+            continue
+        uid, gid = int(fields[2]), int(fields[3])
+        if user.get("uid") != uid or user.get("gid") != gid:
+            logger.info("%s keeps uid %s and gid %s of this system", user["username"], uid, gid)
+            user["uid"], user["gid"] = uid, gid
+            changed = True
+    return changed
 
 
 def _admin_extra(engine) -> List[str]:
