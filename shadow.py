@@ -370,6 +370,10 @@ def boot(engine) -> Dict:
         pool, _ = externals[0]
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
             shutil.copy2(mountpoint / CONFIG_NAME, config_path)
+        restored = _load(config_path)
+        if (restored.get("system") or {}).get("edition") != engine.os_type:
+            restored.setdefault("system", {})["edition"] = engine.os_type
+            _write(config_path, restored)
         result.update(action="restored", source=pool)
         logger.info("Restored the configuration from %s", pool)
 

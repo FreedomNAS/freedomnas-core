@@ -181,8 +181,16 @@ def test_a_reinstall_restores_the_data_pools_copy(tmp_path):
     result = shadow.boot(zfs)
 
     assert (result["action"], result["source"], result["keep"]) == ("restored", "tank", ["tank"])
-    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["system"]["hostname"] == "sarahs-box"
+    restored = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert restored["system"]["hostname"] == "sarahs-box"
     assert (zfs.state / "setup-pending").read_text() == "image\n"
+
+
+def test_a_restore_from_another_edition_records_the_running_one(tmp_path):
+    debian = {**GENTOO, "system": system("2026-10-14T20:00:00+00:00", edition="debian")}
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(debian)}})
+    assert shadow.boot(zfs)["action"] == "restored"
+    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["system"]["edition"] == "gentoo"
 
 
 def test_another_installs_newer_copy_brings_only_what_belongs_to_the_pool(tmp_path):
