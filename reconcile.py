@@ -908,6 +908,9 @@ class ReconciliationEngine:
         from another edition carry that one's: when the directory itself
         has another group, the whole tree is given the right one, once;
         at the next boot the directory already matches and nothing runs.
+        Only when the directory's owner is that user's number here: when the
+        numbers differ, this system gave the name another uid, and the group
+        is left alone rather than handed to whoever holds that number.
         """
         path, owner = share["path"], share["owner"]
         try:
@@ -919,6 +922,11 @@ class ReconciliationEngine:
         if not have or have == want:
             return []
         params = {"path": path, "group": want}
+        mismatch = self._owner_mismatch(path, owner)
+        if mismatch:
+            logger.warning("Group of %s left as %s: %s", path, have, mismatch)
+            return [ActionResult(action="directories.group_set_recursive", params=params,
+                                 target_state="skipped", error=mismatch)]
         try:
             self.engine.execute("directories", "group_set_recursive", group=want, path=path, timeout=3600)
             logger.info("Group of %s: %s -> %s", path, have, want)
@@ -927,6 +935,19 @@ class ReconciliationEngine:
             logger.error("Could not give %s the group %s: %s", path, want, exc)
             return [ActionResult(action="directories.group_set_recursive", params=params,
                                  target_state="failed", error=str(exc))]
+
+    def _owner_mismatch(self, path: str, owner: str) -> Optional[str]:
+        try:
+            stdout, _ = self.engine.execute("directories", "owner_uid_get", path=path, check=False)
+            info, _ = self.engine.execute("users", "get_user_info", username=owner, check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            return None
+        on_disk = stdout.strip()
+        fields = info.strip().split(":")
+        here = fields[2] if len(fields) > 2 else ""
+        if on_disk.isdigit() and here.isdigit() and on_disk != here:
+            return f"its owner is uid {on_disk}, {owner} is uid {here} on this system"
+        return None
 
     def _do_usershares_prepare(self) -> ActionResult:
         """

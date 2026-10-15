@@ -483,6 +483,9 @@ def boot(engine) -> Dict:
         network = _take_network(engine, config_path, externals)
         if network:
             result["network"] = network
+        current = _load(config_path)
+        if _local_ids(engine, current):
+            _write(config_path, current)
     elif externals:
         pool, _ = externals[0]
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
@@ -510,8 +513,10 @@ def boot(engine) -> Dict:
 
 def _local_ids(engine, config: Dict) -> bool:
     """
-    A restored user who already exists here keeps the IDs this system gave
-    them: the configuration describes the system, not the one it came from.
+    A user who exists here has, in the configuration, the IDs this system
+    gave them — after a restore, and when an older configuration recorded
+    none: the configuration describes the system, and its copies on the data
+    pools must carry the numbers the files there are owned by.
     """
     changed = False
     for user in config.get("users") or []:

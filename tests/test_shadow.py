@@ -449,3 +449,15 @@ def test_the_newest_copy_that_knows_this_machine_gives_the_network(tmp_path):
     config = yaml.safe_load((zfs.state / "config.yaml").read_text())
     assert config["system"]["hostname"] == "box"
     assert config["network"] == BOX["network"]
+
+
+def test_a_user_the_configuration_has_no_ids_for_gets_this_systems(tmp_path):
+    old = {**GENTOO, "users": GENTOO["users"] + [{"username": "luca", "groups": []}]}
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(old)}})
+    zfs.passwd = {"luca": (1003, 1003), "sarah": (1001, 1001)}
+
+    shadow.boot(zfs)
+
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert [(u["username"], u.get("uid"), u.get("gid")) for u in config["users"]] == [
+        ("sarah", 1001, 1001), ("luca", 1003, 1003)]

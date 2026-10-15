@@ -820,6 +820,29 @@ def _configured(engine):
     return engine
 
 
+def _owned(owner_uid, user_line):
+    engine = FakeEngine()
+    plain = engine.execute
+    answers = {"group_get": "1001\n", "owner_uid_get": owner_uid + "\n", "get_user_info": user_line}
+    engine.execute = lambda c, a, **k: (
+        (engine.calls.append((c, a, k)) or (answers[a], "")) if a in answers else plain(c, a, **k))
+    engine.get_profile_value = lambda c, k: "{owner}"
+    return engine
+
+
+def test_a_share_owned_by_another_number_keeps_its_group():
+    engine = _owned("1003", "luca:x:1001:1001::/home/luca:/bin/bash\n")
+    [result] = reconciler(engine)._do_owner_group({"path": "/tank/documenti", "owner": "luca"})
+    assert result.target_state == "skipped" and "uid 1003" in result.error
+    assert "group_set_recursive" not in [a for _, a, _ in engine.calls]
+
+
+def test_a_share_owned_by_the_same_number_gets_its_group():
+    engine = _owned("1003", "luca:x:1003:1003::/home/luca:/bin/bash\n")
+    [result] = reconciler(engine)._do_owner_group({"path": "/tank/documenti", "owner": "luca"})
+    assert result.target_state == "applied"
+
+
 def _marked(tmp_path, forget=()):
     config = FakeConfig()
     config.config_path = tmp_path / "config.yaml"
