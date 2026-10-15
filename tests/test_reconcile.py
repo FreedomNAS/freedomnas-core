@@ -218,6 +218,31 @@ def test_only_the_groups_freedomnas_assigns_are_compared():
     assert change.old_value == {"username": "sarah", "groups": []}
 
 
+def test_an_administrator_written_on_debian_keeps_the_running_editions_group():
+    """2026-10-14: a config.yaml written by Debian named `sudo`; on Gentoo the
+    reconciler took `wheel` away from its own administrator."""
+    engine = FakeEngine(values={("users", "sudo_group"): "wheel"})
+    desired = {"users": [{"username": "sarah", "groups": ["sudo", "docker"], "admin": True}]}
+    current = {"users": [{"username": "sarah", "groups": ["sarah", "wheel", "docker"]}]}
+    assert diff(desired, current, engine=engine) == []
+
+
+def test_an_administrator_by_flag_alone_joins_the_running_editions_group():
+    engine = FakeEngine(values={("users", "sudo_group"): "wheel"})
+    desired = {"users": [{"username": "sarah", "groups": [], "admin": True}]}
+    current = {"users": [{"username": "sarah", "groups": ["sarah"]}]}
+    [change] = diff(desired, current, engine=engine)
+    assert (change.path, change.change_type) == ("users.sarah", "modify")
+    assert "wheel" in change.new_value["groups"]
+
+
+def test_the_administrators_group_is_never_taken_away():
+    current = {"users": [{"username": "sarah", "groups": ["sudo"]},
+                         {"username": "mario", "groups": ["mario", "sudo"]}]}
+    desired = {"users": [ADMIN, {"username": "mario", "groups": []}]}
+    assert diff(desired, current) == []
+
+
 def test_users_are_ensured_when_the_system_cannot_list_them():
     assert paths(diff({"users": [ADMIN]}, {"users": None})) == [("users.sarah", "ensure")]
 

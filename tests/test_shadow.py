@@ -1,208 +1,267 @@
 """
-The shadow copy has to reach the data pool, and must never overwrite the copy
-it is reading from.
+The root pool's `.freedomnas` is this install's truth; a data pool's is a
+portable copy that never competes with it, never overwrites what belongs to
+this install, and brings back a reinstall.
 """
 
 from pathlib import Path
 
+import pytest
+import yaml
+
 import shadow
 
 
-class FakeEngine:
-    """Answers like ZFS, and remembers what was mounted where."""
+class Zfs:
+    """
+    Answers like ZFS for the commands shadow.py uses. A dataset keeps its
+    files and its mountpoint; mounting one over a directory hides what the
+    directory held until it is unmounted again.
+    """
 
-    profile = {"paths": {"config_dir": "/etc/freedomnas"}}
+    def __init__(self, tmp_path, pools=("rpool", "tank"), datasets=None, active=None):
+        self.state = tmp_path / "state"
+        self.state.mkdir()
+        self.pools = list(pools)
+        self.datasets = {}
+        for name, files in (datasets or {}).items():
+            self.datasets[name] = {"mountpoint": str(self.state), "files": dict(files)}
+        self.active = None
+        self.hidden = {}
+        self.mounted_at = {}
+        self.fail_mount = set()
+        self.destroyed = []
+        self.profile = {"paths": {"config_dir": str(tmp_path)}}
+        if active:
+            self._mount_state(active)
 
-    def __init__(self, pools, datasets, active=None):
-        self.pools = pools
-        self.datasets = set(datasets)
-        self.active = active
-        self.mounted = {}
-        self.created = []
+    def _mount_state(self, dataset):
+        self.hidden = {f.name: f.read_bytes() for f in self.state.iterdir()}
+        for f in self.state.iterdir():
+            f.unlink()
+        for name, data in self.datasets[dataset]["files"].items():
+            (self.state / name).write_bytes(data)
+        self.active = dataset
 
-    def execute(self, category, action, **kwargs):
+    def _unmount_state(self):
+        self.datasets[self.active]["files"] = {f.name: f.read_bytes() for f in self.state.iterdir()}
+        for f in self.state.iterdir():
+            f.unlink()
+        for name, data in self.hidden.items():
+            (self.state / name).write_bytes(data)
+        self.hidden = {}
+        self.active = None
+
+    def execute(self, category, action, check=True, **kw):
         if action == "pool_list":
             return "\n".join(f"{p}\t1\t2" for p in self.pools), ""
         if action == "dataset_at_path":
-            path = kwargs["path"]
-            if path == "/etc/freedomnas/state":
-                return (self.active or ""), ""
+            path = kw["path"]
+            if path == "/":
+                return "rpool/ROOT/gentoo\n", ""
+            if path == str(self.state):
+                return (self.active or "rpool/ROOT/gentoo") + "\n", ""
             return (path if path in self.datasets else ""), ""
         if action == "create_state_dataset":
-            self.datasets.add(f"{kwargs['pool_name']}/.freedomnas")
-            self.created.append(kwargs["pool_name"])
+            name = f"{kw['pool_name']}/.freedomnas"
+            self.datasets[name] = {"mountpoint": str(self.state), "files": {}}
+            return "", ""
+        if action == "dataset_get_property":
+            return f"{self.datasets[kw['dataset']]['mountpoint']}\tlocal\n", ""
+        if action == "dataset_set":
+            assert kw["dataset"] != self.active, "moved the mountpoint of the dataset in use"
+            self.datasets[kw["dataset"]][kw["property"]] = kw["value"]
             return "", ""
         if action == "mount_dataset_at":
-            self.mounted[kwargs["dataset"]] = kwargs["mountpoint"]
+            if kw["dataset"] in self.fail_mount:
+                raise shadow.CommandExecutionError("cannot mount")
+            for name, data in self.datasets[kw["dataset"]]["files"].items():
+                (Path(kw["mountpoint"]) / name).write_bytes(data)
+            self.mounted_at[kw["mountpoint"]] = kw["dataset"]
             return "", ""
         if action == "unmount_at":
+            dataset = self.mounted_at.pop(kw["mountpoint"])
+            directory = Path(kw["mountpoint"])
+            self.datasets[dataset]["files"] = {f.name: f.read_bytes() for f in directory.iterdir()}
+            for f in directory.iterdir():
+                f.unlink()
+            return "", ""
+        if action == "mount_dataset":
+            if kw["dataset"] in self.fail_mount:
+                raise shadow.CommandExecutionError("cannot mount")
+            assert self.datasets[kw["dataset"]]["mountpoint"] == str(self.state)
+            self._mount_state(kw["dataset"])
+            return "", ""
+        if action == "unmount_dataset":
+            assert kw["dataset"] == self.active
+            self._unmount_state()
+            return "", ""
+        if action == "group_exists":
+            return "", ""
+        if action == "dataset_destroy":
+            self.destroyed.append(kw["dataset"])
             return "", ""
         raise AssertionError(f"unexpected call: {category}.{action}")
 
+    def config(self, dataset):
+        return yaml.safe_load(self.datasets[dataset]["files"]["config.yaml"])
 
-def test_a_new_pool_gets_its_dataset():
-    engine = FakeEngine(pools=["tank"], datasets=[])
-    assert shadow.ensure_dataset(engine, "tank") is True
-    assert engine.created == ["tank"]
+    @property
+    def os_type(self):
+        return "gentoo"
 
-
-def test_an_existing_dataset_is_left_alone():
-    engine = FakeEngine(pools=["tank"], datasets=["tank/.freedomnas"])
-    assert shadow.ensure_dataset(engine, "tank") is False
-    assert engine.created == []
+    init_system = "openrc"
+    profile_dir = "/nonexistent"
 
 
-def test_the_configuration_reaches_the_data_pool(tmp_path):
-    config = tmp_path / "config.yaml"
-    config.write_text("system:\n  hostname: nas\n")
-    engine = FakeEngine(
-        pools=["rpool", "datapool"],
-        datasets=["rpool/.freedomnas", "datapool/.freedomnas"],
-        active="rpool/.freedomnas",
-    )
-    results = shadow.sync(engine, str(config))
-
-    assert [r["dataset"] for r in results] == ["datapool/.freedomnas"]
-    assert results[0]["copied"] is True
-    copied = Path(engine.mounted["datapool/.freedomnas"]) / "config.yaml"
-    # the temporary mountpoint is cleaned up, so check what was written there
-    assert engine.mounted["datapool/.freedomnas"].startswith("/tmp/freedomnas-shadow.")
+@pytest.fixture(autouse=True)
+def _paths(monkeypatch):
+    monkeypatch.setattr(shadow.paths, "config_dir", lambda engine=None: Path(engine.profile["paths"]["config_dir"]))
 
 
-def test_the_pool_being_read_from_is_never_written_to(tmp_path):
-    config = tmp_path / "config.yaml"
-    config.write_text("system: {}\n")
-    engine = FakeEngine(
-        pools=["rpool"], datasets=["rpool/.freedomnas"], active="rpool/.freedomnas"
-    )
-    assert shadow.sync(engine, str(config)) == []
-    assert engine.mounted == {}
+def dump(config):
+    return yaml.safe_dump(config).encode()
 
 
-def test_a_pool_without_the_dataset_is_skipped(tmp_path):
-    config = tmp_path / "config.yaml"
-    config.write_text("system: {}\n")
-    engine = FakeEngine(
-        pools=["rpool", "estranea"],
-        datasets=["rpool/.freedomnas"],
-        active="rpool/.freedomnas",
-    )
-    assert shadow.sync(engine, str(config)) == []
+def system(saved_at, **extra):
+    return {"initialized": True, "saved_at": saved_at, "edition": "gentoo", **extra}
 
 
-def test_no_configuration_yet_is_not_an_error(tmp_path):
-    engine = FakeEngine(pools=["tank"], datasets=["tank/.freedomnas"])
-    assert shadow.sync(engine, str(tmp_path / "assente.yaml")) == []
+GENTOO = {
+    "system": system("2026-10-14T20:00:00+00:00", hostname="sarahs-box"),
+    "users": [{"username": "sarah", "groups": ["docker"], "admin": True, "uid": 1001}],
+    "shares": {"smb": [{"name": "foto"}], "nfs": []},
+    "storage": {"pools": [{"name": "mainpool"}]},
+    "network": {"interfaces": [{"logical_name": "fnas_lan1"}], "interfaces_mapping": {}},
+    "updates": {},
+}
 
 
-class MountingEngine(FakeEngine):
-    """Like FakeEngine, but a dataset keeps what was written into its mount."""
-
-    def __init__(self, state, storage, **kwargs):
-        super().__init__(**kwargs)
-        self.state = state
-        self.storage = storage
-        self.destroyed = []
-
-    def execute(self, category, action, **kwargs):
-        if action == "dataset_at_path" and kwargs["path"] == str(self.state):
-            return (self.active or ""), ""
-        if action == "unmount_at":
-            for dataset, mountpoint in self.mounted.items():
-                if mountpoint == kwargs["mountpoint"]:
-                    target = self.storage / dataset.replace("/", "_")
-                    target.mkdir(exist_ok=True)
-                    for f in Path(mountpoint).iterdir():
-                        (target / f.name).write_bytes(f.read_bytes())
-                        f.unlink()
-            return "", ""
-        if action == "mount_dataset":
-            if kwargs["dataset"] in self.fail_mount:
-                raise shadow.CommandExecutionError(f"cannot mount {kwargs['dataset']}")
-            source = self.storage / kwargs["dataset"].replace("/", "_")
-            for f in source.iterdir():
-                (self.state / f.name).write_bytes(f.read_bytes())
-            self.active = kwargs["dataset"]
-            return "", ""
-        if action == "unmount_dataset":
-            assert kwargs["dataset"] == self.active
-            target = self.storage / self.active.replace("/", "_")
-            target.mkdir(exist_ok=True)
-            for f in self.state.iterdir():
-                (target / f.name).write_bytes(f.read_bytes())
-                f.unlink()
-            self.active = None
-            return "", ""
-        if action == "dataset_destroy":
-            assert kwargs["dataset"] != self.active, "destroyed the dataset serving the state"
-            self.datasets.discard(kwargs["dataset"])
-            self.destroyed.append(kwargs["dataset"])
-            return "", ""
-        return super().execute(category, action, **kwargs)
-
-    fail_mount = ()
-    destroyed: list
+def test_a_data_pool_gets_a_copy_that_never_mounts_over_the_state(tmp_path):
+    zfs = Zfs(tmp_path)
+    assert shadow.ensure_dataset(zfs, "tank") is True
+    assert zfs.datasets["tank/.freedomnas"]["mountpoint"] == str(tmp_path / "shared")
+    assert shadow.ensure_dataset(zfs, "tank") is False
 
 
-def test_the_setup_moves_the_configuration_onto_the_chosen_pool(tmp_path, monkeypatch):
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "config.yaml").write_text("system:\n  hostname: nas\n")
-    storage = tmp_path / "zfs"
-    storage.mkdir()
-    monkeypatch.setattr(shadow.paths, "state_dir", lambda engine=None: state)
-    engine = MountingEngine(state, storage, pools=["rpool", "tank"], datasets=[])
-
-    assert shadow.activate(engine, "tank") == "tank/.freedomnas"
-
-    assert engine.created == ["tank"]
-    assert (storage / "tank_.freedomnas" / "config.yaml").read_text() == "system:\n  hostname: nas\n"
-    assert engine.active == "tank/.freedomnas"
-    assert (state / "config.yaml").read_text() == "system:\n  hostname: nas\n"
+def test_the_root_pool_keeps_the_state_mountpoint(tmp_path):
+    zfs = Zfs(tmp_path)
+    shadow.ensure_dataset(zfs, "rpool")
+    assert zfs.datasets["rpool/.freedomnas"]["mountpoint"] == str(zfs.state)
 
 
-def test_activating_the_pool_already_serving_the_state_does_nothing():
-    engine = FakeEngine(pools=["tank"], datasets=["tank/.freedomnas"], active="tank/.freedomnas")
-    assert shadow.activate(engine, "tank") == "tank/.freedomnas"
-    assert engine.created == [] and engine.mounted == {}
+def test_the_configuration_reaches_the_data_pool_and_not_its_source(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": b"system: {}\n"},
+                                  "tank/.freedomnas": {}},
+              active="rpool/.freedomnas")
+    results = shadow.sync(zfs, str(zfs.state / "config.yaml"))
+    assert [(r["dataset"], r["copied"]) for r in results] == [("tank/.freedomnas", True)]
+    assert zfs.datasets["tank/.freedomnas"]["files"]["config.yaml"] == b"system: {}\n"
+    assert zfs.datasets["tank/.freedomnas"]["mountpoint"] == str(tmp_path / "shared")
 
 
-def _served_from_rpool(tmp_path, monkeypatch):
-    """An image's layout: the state already lives on the root pool's dataset."""
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "config.yaml").write_text("system:\n  hostname: nas\n")
-    storage = tmp_path / "zfs"
-    storage.mkdir()
-    monkeypatch.setattr(shadow.paths, "state_dir", lambda engine=None: state)
-    engine = MountingEngine(state, storage, pools=["rpool", "tank"],
-                            datasets=["rpool/.freedomnas"], active="rpool/.freedomnas")
-    return engine, state, storage
+def test_a_fresh_install_keeps_its_answers_on_the_root_pool(tmp_path):
+    zfs = Zfs(tmp_path, pools=["rpool"])
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+    (zfs.state / "setup-pending").write_text("install\n")
+
+    result = shadow.boot(zfs)
+
+    assert result == {"internal": "rpool/.freedomnas", "action": "none", "source": None, "keep": []}
+    assert zfs.active == "rpool/.freedomnas"
+    assert set(zfs.datasets["rpool/.freedomnas"]["files"]) == {"config.yaml", "setup-pending"}
+    assert zfs.hidden == {}, "copies left on the root filesystem under the mount"
 
 
-def test_a_state_served_from_the_root_pool_moves_and_the_old_dataset_goes(tmp_path, monkeypatch):
-    engine, state, storage = _served_from_rpool(tmp_path, monkeypatch)
+def test_a_reinstall_restores_the_data_pools_copy(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+    (zfs.state / "setup-pending").write_text("image\n")
 
-    assert shadow.activate(engine, "tank") == "tank/.freedomnas"
+    result = shadow.boot(zfs)
 
-    assert engine.active == "tank/.freedomnas"
-    assert (storage / "tank_.freedomnas" / "config.yaml").read_text() == "system:\n  hostname: nas\n"
-    assert (state / "config.yaml").read_text() == "system:\n  hostname: nas\n"
-    assert engine.destroyed == ["rpool/.freedomnas"]
-    assert "rpool/.freedomnas" not in engine.datasets
+    assert (result["action"], result["source"], result["keep"]) == ("restored", "tank", ["tank"])
+    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["system"]["hostname"] == "sarahs-box"
+    assert (zfs.state / "setup-pending").read_text() == "image\n"
 
 
-def test_a_move_that_cannot_mount_the_new_dataset_keeps_the_old_one(tmp_path, monkeypatch):
-    engine, state, _ = _served_from_rpool(tmp_path, monkeypatch)
-    engine.fail_mount = ("tank/.freedomnas",)
+def test_another_installs_newer_copy_brings_only_what_belongs_to_the_pool(tmp_path):
+    debian = {
+        "system": system("2026-10-15T01:00:00+00:00", hostname="debian-test", edition="debian"),
+        "users": [{"username": "sarah", "groups": ["sudo", "docker"], "admin": True, "uid": 1000},
+                  {"username": "luca", "groups": ["sudo"], "uid": 1003}],
+        "shares": {"smb": [{"name": "foto"}, {"name": "documenti"}], "nfs": []},
+        "storage": {"pools": [{"name": "mainpool"}, {"name": "tank"}]},
+        "network": {"interfaces": [{"logical_name": "fnas_lan9"}], "interfaces_mapping": {}},
+    }
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+                                  "tank/.freedomnas": {"config.yaml": dump(debian)}})
 
-    try:
-        shadow.activate(engine, "tank")
-    except shadow.CommandExecutionError:
-        pass
-    else:
-        raise AssertionError("activate reported success without mounting the new dataset")
+    result = shadow.boot(zfs)
 
-    assert engine.active == "rpool/.freedomnas"
-    assert engine.destroyed == []
-    assert (state / "config.yaml").read_text() == "system:\n  hostname: nas\n"
+    assert (result["action"], result["source"], result["keep"]) == ("merged", "tank", ["tank"])
+    merged = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert merged["system"]["hostname"] == "sarahs-box"
+    assert merged["system"]["edition"] == "gentoo"
+    assert merged["network"]["interfaces"] == [{"logical_name": "fnas_lan1"}]
+    assert merged["users"][0] == {"username": "sarah", "groups": ["docker"], "admin": True, "uid": 1001}
+    assert merged["users"][1] == {"username": "luca", "groups": [], "admin": False, "uid": 1003}
+    assert [s["name"] for s in merged["shares"]["smb"]] == ["foto", "documenti"]
+    assert [p["name"] for p in merged["storage"]["pools"]] == ["mainpool", "tank"]
+    assert merged["system"]["saved_at"] > debian["system"]["saved_at"]
+
+
+def test_an_older_copy_changes_nothing(tmp_path):
+    old = {**GENTOO, "system": system("2026-10-14T08:00:00+00:00"), "shares": {"smb": [], "nfs": []}}
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+                                  "tank/.freedomnas": {"config.yaml": dump(old)}})
+    before = zfs.datasets["rpool/.freedomnas"]["files"]["config.yaml"]
+
+    assert shadow.boot(zfs)["action"] == "local"
+    assert (zfs.state / "config.yaml").read_bytes() == before
+
+
+def test_a_state_served_from_a_data_pool_moves_home_and_nothing_is_destroyed(tmp_path):
+    """Every install set up before the internal dataset: the wizard put the
+    state on the data pool and destroyed the root pool's."""
+    zfs = Zfs(tmp_path, datasets={"mainpool/.freedomnas": {"config.yaml": dump(GENTOO)}},
+              pools=["rpool", "mainpool"], active="mainpool/.freedomnas")
+
+    assert shadow.boot(zfs)["action"] == "local"
+
+    assert zfs.active == "rpool/.freedomnas"
+    assert zfs.config("rpool/.freedomnas") == yaml.safe_load(dump(GENTOO))
+    assert zfs.config("mainpool/.freedomnas") == yaml.safe_load(dump(GENTOO))
+    assert zfs.datasets["mainpool/.freedomnas"]["mountpoint"] == str(tmp_path / "shared")
+    assert zfs.destroyed == []
+
+
+def test_an_internal_dataset_that_cannot_mount_gives_the_old_one_back(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"mainpool/.freedomnas": {"config.yaml": dump(GENTOO)}},
+              pools=["rpool", "mainpool"], active="mainpool/.freedomnas")
+    zfs.fail_mount = {"rpool/.freedomnas"}
+    zfs.datasets["rpool/.freedomnas"] = {"mountpoint": str(zfs.state), "files": {}}
+
+    with pytest.raises(shadow.CommandExecutionError):
+        shadow.activate(zfs)
+
+    assert zfs.active == "mainpool/.freedomnas"
+    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["system"]["hostname"] == "sarahs-box"
+
+
+def test_the_wizard_gives_the_chosen_pool_a_copy(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {}}, active="rpool/.freedomnas")
+    assert shadow.activate(zfs, "tank") == "rpool/.freedomnas"
+    assert zfs.active == "rpool/.freedomnas"
+    assert zfs.datasets["tank/.freedomnas"]["mountpoint"] == str(tmp_path / "shared")
+
+
+def test_a_root_filesystem_outside_zfs_is_left_alone(tmp_path):
+    class NoZfsRoot(Zfs):
+        def execute(self, category, action, check=True, **kw):
+            if action == "dataset_at_path" and kw["path"] == "/":
+                return "", ""
+            return super().execute(category, action, check=check, **kw)
+
+    zfs = NoZfsRoot(tmp_path, pools=[])
+    assert shadow.boot(zfs) == {"internal": None, "action": "none", "source": None, "keep": []}

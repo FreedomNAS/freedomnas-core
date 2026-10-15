@@ -7,11 +7,12 @@ and cross-OS migration.
 """
 
 import copy
+import json
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+from typing import Dict, Any, Optional, List, Set
+from datetime import datetime, timezone
 
 try:
     from freedomnas import paths
@@ -24,6 +25,40 @@ logger = logging.getLogger("FreedomNAS.Config")
 class ConfigurationException(Exception):
     """Base exception for configuration errors"""
     pass
+
+
+def known_admin_groups() -> Set[str]:
+    """
+    The administrators' group of every edition (`users.sudo_group` in each
+    users profile). The configuration records an administrator as
+    `admin: true`, never by one of these names: a configuration written on
+    Debian (`sudo`) is read on Gentoo (`wheel`) too.
+    """
+    root = paths.profiles_dir()
+    groups: Set[str] = set()
+    if not root:
+        return groups
+    for profile in sorted((root / "users").glob("users-*.json")):
+        try:
+            value = (json.loads(profile.read_text()).get("users") or {}).get("sudo_group")
+        except (OSError, ValueError):
+            continue
+        if value:
+            groups.add(value)
+    return groups
+
+
+def normalize_user(user: Dict[str, Any], admin_groups: Optional[Set[str]] = None) -> Dict[str, Any]:
+    """A user entry with its administrators' group turned into `admin: true`."""
+    admin_groups = known_admin_groups() if admin_groups is None else admin_groups
+    groups = list(user.get("groups") or [])
+    named = [g for g in groups if g in admin_groups]
+    entry = dict(user)
+    if named or "groups" in user:
+        entry["groups"] = [g for g in groups if g not in admin_groups]
+    if named:
+        entry["admin"] = True
+    return entry
 
 
 class ConfigurationManager:
@@ -56,6 +91,7 @@ class ConfigurationManager:
             "initialized_by": None,  # "installer" or "webui"
             "edition": None,  # "debian" or "freebsd"
             "root_filesystem": None,  # "zfs"
+            "saved_at": None,
         },
         "network": {
             "interfaces": [],
@@ -154,6 +190,7 @@ class ConfigurationManager:
                     loaded_config = yaml.safe_load(f) or {}
                 self.config = self._merge_with_defaults(loaded_config)
                 self._validate_config(self.config)
+                self._normalize_users()
                 logger.info(f"Loaded configuration from: {self.config_path}")
             except yaml.YAMLError as e:
                 raise ConfigurationException(f"Invalid YAML in {self.config_path}: {e}")
@@ -184,6 +221,7 @@ class ConfigurationManager:
         try:
             # Validate before saving
             self._validate_config(self.config)
+            self.config["system"]["saved_at"] = datetime.now(timezone.utc).isoformat()
             
             # Ensure parent directory exists
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +257,13 @@ class ConfigurationManager:
                 logger.warning(f"Save failed, restored backup from: {backup_path}")
             raise ConfigurationException(f"Error saving configuration: {e}")
     
+    def _normalize_users(self) -> None:
+        admin_groups = known_admin_groups()
+        self.config["users"] = [
+            normalize_user(u, admin_groups) if isinstance(u, dict) else u
+            for u in self.config["users"]
+        ]
+
     def _merge_with_defaults(self, loaded_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Merge loaded configuration with defaults.
@@ -499,7 +544,7 @@ class ConfigurationManager:
             if u.get("username") != username
         ]
         
-        self.config["users"].append(user_config)
+        self.config["users"].append(normalize_user(user_config))
         self.save()
     
     def get_users(self) -> List[Dict[str, Any]]:

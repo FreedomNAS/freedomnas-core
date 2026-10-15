@@ -458,3 +458,23 @@ def test_a_bridge_does_not_take_its_ports_mac_in_the_name_mapping(tmp_path):
     cfg.add_interface({"logical_name": "fnas_lan1", "mac_address": "52:54:00:00:00:0a"})
     cfg.add_interface({"logical_name": "fnas_bridge1", "type": "bridge", "mac_address": "52:54:00:00:00:0a"})
     assert cfg.get("network.interfaces_mapping") == {"52:54:00:00:00:0a": "fnas_lan1"}
+
+
+def test_an_administrators_group_is_recorded_as_the_admin_flag(tmp_path):
+    from config import known_admin_groups, normalize_user
+    assert {"sudo", "wheel"} <= known_admin_groups()
+    assert normalize_user({"username": "a", "groups": ["sudo", "docker"]}) == {
+        "username": "a", "groups": ["docker"], "admin": True}
+    assert normalize_user({"username": "b", "groups": ["wheel"], "admin": False})["admin"] is True
+    assert normalize_user({"username": "c", "groups": ["users"]}) == {"username": "c", "groups": ["users"]}
+
+
+def test_an_old_configuration_is_read_with_admin_flags(tmp_path):
+    from config import ConfigurationManager
+    path = tmp_path / "config.yaml"
+    path.write_text("users:\n- username: sarah\n  groups: [sudo, docker]\n")
+    manager = ConfigurationManager(config_path=str(path))
+    assert manager.get_user("sarah") == {"username": "sarah", "groups": ["docker"], "admin": True}
+    manager.add_user({"username": "luca", "groups": ["wheel"]})
+    assert manager.get_user("luca")["admin"] is True
+    assert manager.get("system.saved_at")

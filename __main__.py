@@ -216,6 +216,28 @@ def cmd_shadow_sync(_args) -> int:
     return 1 if failed else 0
 
 
+def cmd_state_boot(_args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas import shadow
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        import shadow  # type: ignore
+
+    try:
+        result = shadow.boot(get_engine())
+    except Exception as exc:
+        print(f"ERROR: could not put the configuration in place: {exc}", file=sys.stderr)
+        return 1
+    print(f"action {result['action']}")
+    print(f"internal {result['internal']}")
+    if result["source"]:
+        print(f"source {result['source']}")
+    for pool in result["keep"]:
+        print(f"keep {pool}")
+    return 0
+
+
 def cmd_ensure_tls(args) -> int:
     try:
         from freedomnas import tls
@@ -427,6 +449,11 @@ def main() -> int:
         help="Mirror the configuration onto every other pool's .freedomnas dataset",
     )
 
+    sub.add_parser(
+        "state-boot",
+        help="Mount the root pool's .freedomnas and restore or merge from the data pools (called at boot)",
+    )
+
     tls_parser = sub.add_parser(
         "ensure-tls",
         help="Create the WebUI's self-signed certificate if it is not there yet",
@@ -455,6 +482,7 @@ def main() -> int:
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
         "shadow-sync":  cmd_shadow_sync,
+        "state-boot":   cmd_state_boot,
         "path":         cmd_path,
         "boot-ok":      cmd_boot_ok,
         "serve":        cmd_serve,

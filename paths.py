@@ -72,6 +72,11 @@ def state_dir(engine=None) -> Path:
     return config_dir(engine) / "state"
 
 
+def shared_dir(engine=None) -> Path:
+    """The mountpoint a data pool's `.freedomnas` carries: never the state's own."""
+    return config_dir(engine) / "shared"
+
+
 def tls_dir(engine=None) -> Path:
     return config_dir(engine) / "tls"
 

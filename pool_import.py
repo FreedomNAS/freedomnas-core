@@ -30,10 +30,12 @@ import yaml
 try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
     from freedomnas import keymgmt, shadow
+    from freedomnas.config import known_admin_groups, normalize_user
 except ImportError:  # running from the repository, not from the package
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore
     import keymgmt  # type: ignore
     import shadow  # type: ignore
+    from config import known_admin_groups, normalize_user  # type: ignore
 
 logger = logging.getLogger("FreedomNAS.PoolImport")
 
@@ -44,7 +46,6 @@ SYSTEM_DIRS = (
 )
 UNMOUNTED = ("none", "legacy")
 IMPORTABLE_STATES = ("ONLINE", "DEGRADED")
-ADMIN_GROUPS = ("sudo", "wheel")
 
 
 class ImportProblem(Exception):
@@ -398,14 +399,16 @@ def foreign_shares(config: Dict, old: Dict[str, str], new: Dict[str, str]) -> Di
 
 def foreign_users(config: Dict) -> List[Dict]:
     users = []
+    admin_groups = known_admin_groups()
     for user in config.get("users") or []:
         if isinstance(user, dict) and user.get("username"):
+            user = normalize_user(user, admin_groups)
             users.append({
                 "username": user["username"],
                 "uid": user.get("uid"),
                 "groups": list(user.get("groups") or []),
                 "shell": user.get("shell") or "/bin/bash",
-                "admin": any(g in ADMIN_GROUPS for g in user.get("groups") or []),
+                "admin": bool(user.get("admin")),
             })
     return users
 

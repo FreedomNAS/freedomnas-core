@@ -28,7 +28,7 @@ try:
         CommandExecutionError,
         CommandTranslationError,
     )
-    from freedomnas.config import ConfigurationManager
+    from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas.package_manager import admin_groups_present
     from freedomnas import netconfig, netnames, usershares, wireguard
@@ -39,7 +39,7 @@ except ImportError:
         CommandExecutionError,
         CommandTranslationError,
     )
-    from config import ConfigurationManager  # type: ignore[no-redef]
+    from config import ConfigurationManager, known_admin_groups, normalize_user  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
     from package_manager import admin_groups_present  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
@@ -93,10 +93,15 @@ _FEATURE_SERVICE_MAP: Dict[str, tuple] = {
 
 
 def _normalize(state: dict) -> dict:
-    """config.yaml keeps shares under shares.smb/nfs; the plan reads them flat."""
+    """
+    config.yaml keeps shares under shares.smb/nfs; the plan reads them flat.
+    Administrators are `admin: true`, whatever group an older file named.
+    """
     shares = state.get("shares") or {}
+    admin_groups = known_admin_groups()
     return {
         **state,
+        "users": [normalize_user(u, admin_groups) for u in state.get("users") or [] if isinstance(u, dict)],
         "smb_shares": state.get("smb_shares", shares.get("smb", [])),
         "nfs_shares": state.get("nfs_shares", shares.get("nfs", [])),
     }
@@ -327,7 +332,9 @@ class ReconciliationEngine:
         existing = {u["username"]: u for u in observed_users or []}
         wanted_users = {u["username"]: u for u in desired.get("users", []) if u.get("username")}
         managed = self._managed_groups(desired)
-        admin_extra = self._admin_groups(wanted_users.values())
+        sudo_group = self._profile_value("users", "sudo_group")
+        admin_extra = ([sudo_group] if sudo_group else []) + [
+            g for g in self._admin_groups(wanted_users.values()) if g != sudo_group]
         managed |= set(admin_extra)
         for name, user in list(wanted_users.items()):
             if admin_extra and self._is_admin(user):
@@ -341,6 +348,11 @@ class ReconciliationEngine:
             else:
                 have = set(existing[name].get("groups", [])) & managed
                 want = set(user.get("groups", [])) & managed
+                if sudo_group in have - want:
+                    logger.info("Keeping %s in %s: administrators lose their rights from the WebUI only",
+                                name, sudo_group)
+                    want.add(sudo_group)
+                    user = {**user, "groups": list(user.get("groups", [])) + [sudo_group]}
                 if have != want:
                     changes.append(Change(
                         f"users.{name}",
@@ -428,8 +440,7 @@ class ReconciliationEngine:
         return groups
 
     def _is_admin(self, user: dict) -> bool:
-        sudo_group = self._profile_value("users", "sudo_group")
-        return bool(user.get("admin") or (sudo_group and sudo_group in user.get("groups", [])))
+        return bool(normalize_user(user).get("admin"))
 
     def _admin_groups(self, users) -> List[str]:
         """
@@ -446,11 +457,7 @@ class ReconciliationEngine:
             return []
 
     def _names_an_admin(self, desired: dict) -> bool:
-        sudo_group = self._profile_value("users", "sudo_group")
-        return any(
-            u.get("admin") or (sudo_group and sudo_group in u.get("groups", []))
-            for u in desired.get("users", [])
-        )
+        return any(self._is_admin(u) for u in desired.get("users", []))
 
     # ------------------------------------------------------------------
     # Applying
