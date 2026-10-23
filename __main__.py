@@ -243,17 +243,25 @@ def cmd_state_boot(_args) -> int:
 def cmd_ensure_tls(args) -> int:
     try:
         from freedomnas import tls
+        from freedomnas.engine import get_engine
     except ImportError:
         import tls  # type: ignore
+        from engine import get_engine  # type: ignore
 
     try:
-        created = tls.ensure_certificate(args.hostname)
+        addresses = tls.addresses(get_engine())
+    except Exception as exc:
+        print(f"WARNING: could not read the network addresses: {exc}", file=sys.stderr)
+        addresses = []
+    try:
+        issued = tls.ensure_certificate(args.hostname, addresses, not args.names_only)
     except Exception as exc:
         print(f"ERROR: could not create the TLS certificate: {exc}", file=sys.stderr)
         return 1
 
-    if created:
-        print(f"Created a self-signed certificate at {tls.cert_file()}")
+    if issued:
+        print(f"Issued the server certificate at {tls.cert_file()}")
+    print(f"Certificate authority fingerprint (SHA-256): {tls.ca_fingerprint()}")
     print(f"Certificate fingerprint (SHA-256): {tls.fingerprint()}")
     return 0
 
@@ -458,11 +466,15 @@ def main() -> int:
 
     tls_parser = sub.add_parser(
         "ensure-tls",
-        help="Create the WebUI's self-signed certificate if it is not there yet",
+        help="Create FreedomNAS's certificate authority and (re)issue the WebUI's certificate for this host's names and addresses",
     )
     tls_parser.add_argument(
         "--hostname", default="",
         help="Name to put in the certificate (default: the system hostname)",
+    )
+    tls_parser.add_argument(
+        "--names-only", action="store_true",
+        help="Issue the certificate again only for a missing name, not for a new address",
     )
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
     path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending"])
