@@ -151,6 +151,14 @@ def cmd_grow_root_pool(_args) -> int:
     return 0
 
 
+def _mirror_saves(engine, config) -> None:
+    try:
+        from freedomnas import shadow
+    except ImportError:
+        import shadow  # type: ignore
+    config.on_save.append(shadow.mirror_after_save(engine))
+
+
 def cmd_snapshot_run(args) -> int:
     try:
         from freedomnas.engine import get_engine
@@ -164,6 +172,7 @@ def cmd_snapshot_run(args) -> int:
     try:
         engine = get_engine()
         config = ConfigurationManager()
+        _mirror_saves(engine, config)
     except Exception as exc:
         print(f"ERROR: could not initialise: {exc}", file=sys.stderr)
         return 1
@@ -301,6 +310,7 @@ def cmd_reconcile(args) -> int:
     try:
         engine = get_engine()
         config = ConfigurationManager()
+        _mirror_saves(engine, config)
         reconciler = ReconciliationEngine(engine, config)
     except Exception as exc:
         print(f"ERROR: could not initialise reconciler: {exc}", file=sys.stderr)
@@ -341,6 +351,7 @@ def cmd_boot_ok(_args) -> int:
     try:
         engine = get_engine()
         config = ConfigurationManager()
+        _mirror_saves(engine, config)
     except Exception as exc:
         print(f"ERROR: could not initialise engine: {exc}", file=sys.stderr)
         return 1
@@ -363,6 +374,7 @@ def cmd_serve(_args) -> int:
     try:
         engine = get_engine()
         config = ConfigurationManager()
+        _mirror_saves(engine, config)
         orchestrator = Orchestrator(engine, config)
         loader = ModuleLoader(engine, config)
     except Exception as exc:

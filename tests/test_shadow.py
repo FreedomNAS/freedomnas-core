@@ -461,3 +461,58 @@ def test_a_user_the_configuration_has_no_ids_for_gets_this_systems(tmp_path):
     config = yaml.safe_load((zfs.state / "config.yaml").read_text())
     assert [(u["username"], u.get("uid"), u.get("gid")) for u in config["users"]] == [
         ("sarah", 1001, 1001), ("luca", 1003, 1003)]
+
+
+def _mirror_setup(tmp_path, config):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(config)},
+                                  "tank/.freedomnas": {"config.yaml": b"old\n"}},
+              active="rpool/.freedomnas")
+    return zfs, zfs.state / "config.yaml"
+
+
+def _wait(mirror):
+    mirror._timer.join(5)
+
+
+def test_a_save_reaches_the_data_pool_moments_later(tmp_path):
+    zfs, path = _mirror_setup(tmp_path, GENTOO)
+    mirror = shadow.mirror_after_save(zfs, delay=0.05)
+    mirror(path)
+    _wait(mirror)
+    assert zfs.config("tank/.freedomnas") == GENTOO
+
+
+def test_saves_close_together_give_one_copy_of_the_last(tmp_path, monkeypatch):
+    zfs, path = _mirror_setup(tmp_path, GENTOO)
+    copies = []
+    real = shadow._copy_into
+    monkeypatch.setattr(shadow, "_copy_into", lambda e, d, s: copies.append(s.read_bytes()) or real(e, d, s))
+    mirror = shadow.mirror_after_save(zfs, delay=0.2)
+    mirror(path)
+    last = {**GENTOO, "shares": {"smb": [], "nfs": []}}
+    path.write_bytes(dump(last))
+    mirror(path)
+    _wait(mirror)
+    assert copies == [dump(last)]
+    assert zfs.config("tank/.freedomnas")["shares"] == {"smb": [], "nfs": []}
+
+
+def test_a_configuration_not_initialized_never_overwrites_the_copy(tmp_path):
+    zfs, path = _mirror_setup(tmp_path, {"system": {"initialized": False}})
+    mirror = shadow.mirror_after_save(zfs, delay=0.05)
+    mirror(path)
+    _wait(mirror)
+    assert zfs.datasets["tank/.freedomnas"]["files"]["config.yaml"] == b"old\n"
+
+
+def test_a_change_mirrored_after_saving_survives_the_next_boot(tmp_path):
+    zfs, path = _mirror_setup(tmp_path, GENTOO)
+    changed = {**GENTOO, "system": system("2026-10-24T04:24:00+00:00", hostname="sarahs-box"),
+               "modules": {"proxy": {"enabled": False}}}
+    path.write_bytes(dump(changed))
+    mirror = shadow.mirror_after_save(zfs, delay=0.05)
+    mirror(path)
+    _wait(mirror)
+    zfs._unmount_state()
+    shadow.boot(zfs)
+    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["modules"]["proxy"] == {"enabled": False}

@@ -17,7 +17,11 @@ matter, and they are not equal:
     never compete with the internal one for the state directory.
 
 Every save stamps `system.saved_at`, and a copy on a data pool carries the
-stamp of the save it mirrors. At boot, what belongs to the pools is taken
+stamp of the save it mirrors. A process that saves the configuration hooks
+mirror_after_save() onto it, so the copies follow every change a few seconds
+later (saves close together give one copy); the nightly shadow-sync is only a
+second chance. Only an initialized configuration is ever mirrored: a fresh
+install never overwrites the copy it could be restored from. At boot, what belongs to the pools is taken
 from the newest external copy, whichever install wrote it and however old
 it is next to the internal one: shares, snapshot policies, modules, pools,
 and users this install does not have. What belongs to this install — its
@@ -43,8 +47,9 @@ import copy
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 import yaml
 
@@ -221,16 +226,58 @@ def sync(engine, config_path: str) -> List[Dict]:
         logger.warning("No configuration at %s — nothing to mirror", source)
         return []
 
-    active = active_dataset(engine)
-    root = root_pool(engine)
-    results = []
-    for pool in _pools(engine):
-        dataset = f"{pool}/{DATASET_NAME}"
-        if dataset == active or not _exists(engine, dataset) or foreign_root(engine, pool, root):
-            continue
-        _make_external(engine, dataset)
-        results.append(_copy_into(engine, dataset, source))
-    return results
+    with _SYNC_LOCK:
+        active = active_dataset(engine)
+        root = root_pool(engine)
+        results = []
+        for pool in _pools(engine):
+            dataset = f"{pool}/{DATASET_NAME}"
+            if dataset == active or not _exists(engine, dataset) or foreign_root(engine, pool, root):
+                continue
+            _make_external(engine, dataset)
+            results.append(_copy_into(engine, dataset, source))
+        return results
+
+
+_SYNC_LOCK = threading.RLock()
+MIRROR_DELAY = 3.0
+
+
+class _Mirror:
+    """One copy to the data pools a moment after the last of a burst of saves."""
+
+    def __init__(self, engine, delay: float):
+        self.engine = engine
+        self.delay = delay
+        self._lock = threading.Lock()
+        self._timer: Optional[threading.Timer] = None
+
+    def __call__(self, config_path: Path) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.delay, self.run, args=(Path(config_path),))
+            self._timer.daemon = False
+            self._timer.start()
+
+    def run(self, config_path: Path) -> List[Dict]:
+        try:
+            if not _initialized(_load(config_path)):
+                logger.info("Configuration not initialized yet: not mirrored")
+                return []
+            results = sync(self.engine, str(config_path))
+        except Exception as exc:
+            logger.error("Mirroring the configuration failed: %s", exc)
+            return []
+        for result in results:
+            if result["error"]:
+                logger.warning("Configuration not mirrored to %s: %s", result["dataset"], result["error"])
+        return results
+
+
+def mirror_after_save(engine, delay: float = MIRROR_DELAY) -> Callable[[Path], None]:
+    """A ConfigurationManager.on_save hook that mirrors the configuration after each save."""
+    return _Mirror(engine, delay)
 
 
 def _copy_into(engine, dataset: str, source: Path) -> Dict:

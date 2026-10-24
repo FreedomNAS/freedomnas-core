@@ -478,3 +478,23 @@ def test_an_old_configuration_is_read_with_admin_flags(tmp_path):
     manager.add_user({"username": "luca", "groups": ["wheel"]})
     assert manager.get_user("luca")["admin"] is True
     assert manager.get("system.saved_at")
+
+
+def test_every_save_runs_the_hooks_with_the_file(tmp_path):
+    mgr = ConfigurationManager(config_path=str(tmp_path / "config.yaml"))
+    seen = []
+    mgr.on_save.append(seen.append)
+    mgr.save()
+    mgr.save()
+    assert seen == [tmp_path / "config.yaml", tmp_path / "config.yaml"]
+
+
+def test_a_failing_hook_does_not_fail_the_save(tmp_path):
+    mgr = ConfigurationManager(config_path=str(tmp_path / "config.yaml"))
+
+    def broken(path):
+        raise RuntimeError("no pool")
+
+    mgr.on_save.append(broken)
+    mgr.save()
+    assert (tmp_path / "config.yaml").exists()

@@ -11,7 +11,7 @@ import json
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Set
+from typing import Callable, Dict, Any, Optional, List, Set
 from datetime import datetime, timezone
 
 try:
@@ -138,6 +138,7 @@ class ConfigurationManager:
         """
         self.config_path = Path(config_path) if config_path else self._find_config_path()
         self.config: Dict[str, Any] = {}
+        self.on_save: List[Callable[[Path], None]] = []
         self.load()
     
     def _find_config_path(self) -> Path:
@@ -246,7 +247,13 @@ class ConfigurationManager:
             # 3. Promote temporary to permanent (atomic on POSIX)
             temp_path.rename(self.config_path)
             logger.info(f"Saved configuration to: {self.config_path}")
-            
+
+            for hook in self.on_save:
+                try:
+                    hook(self.config_path)
+                except Exception as exc:
+                    logger.warning("After saving the configuration: %s", exc)
+
         except ConfigurationException:
             raise
         except Exception as e:
