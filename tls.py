@@ -13,7 +13,9 @@ appliance is without a CA the browser knows, so FreedomNAS keeps its own:
                         HTTPS with it) present, signed by the CA, followed by
                         the CA itself.
 
-The server certificate names the hostname and every address the NAS has, and
+The server certificate names the hostname (also as <hostname>.local, and as
+<hostname>.home.arpa with every name below it: the local domain of RFC 8375,
+where the reverse proxy serves the apps by name) and every address the NAS has, and
 is issued again at boot whenever one of them is missing from it, whenever it
 was not signed by this CA (installs from before the CA had a self-signed one)
 and before it expires. Clients that trust the CA never notice.
@@ -54,10 +56,18 @@ _SERVER_DAYS = 800
 _RENEW_DAYS = 90
 
 
+LOCAL_DOMAIN = "home.arpa"
+
+
+def local_domain(hostname: str = "") -> str:
+    """The domain the apps are named under on the LAN: <hostname>.home.arpa."""
+    return f"{hostname or socket.gethostname() or 'freedomnas'}.{LOCAL_DOMAIN}"
+
+
 def _names(hostname: str, addresses: Iterable[str] = ()) -> Tuple[List[str], List[str]]:
     dns = ["localhost"]
     if hostname and hostname not in dns:
-        dns[:0] = [hostname, f"{hostname}.local"]
+        dns[:0] = [hostname, f"{hostname}.local", f"{hostname}.{LOCAL_DOMAIN}", f"*.{hostname}.{LOCAL_DOMAIN}"]
     ips = ["127.0.0.1", "::1"]
     for address in addresses:
         if address not in ips:

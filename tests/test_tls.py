@@ -29,7 +29,7 @@ def san(cert):
 def test_the_server_certificate_names_the_host_and_its_addresses():
     assert tls.ensure_certificate("nas", ["192.168.1.200", "fd00::2"])
     dns, ips = san(server_cert())
-    assert dns == {"nas", "nas.local", "localhost"}
+    assert dns == {"nas", "nas.local", "nas.home.arpa", "*.nas.home.arpa", "localhost"}
     assert ips == {"127.0.0.1", "::1", "192.168.1.200", "fd00::2"}
 
 
@@ -127,7 +127,7 @@ def test_describe_tells_what_the_webui_shows():
     tls.ensure_certificate("nas", ["192.168.1.200"])
     info = tls.describe()
     assert info["ca_fingerprint"] == tls.ca_fingerprint() != info["fingerprint"]
-    assert info["names"] == ["nas", "nas.local", "localhost"]
+    assert info["names"] == ["nas", "nas.local", "nas.home.arpa", "*.nas.home.arpa", "localhost"]
     assert info["addresses"] == ["127.0.0.1", "::1", "192.168.1.200"]
     assert info["expires"].startswith(str(server_cert().not_valid_after_utc.year))
 
