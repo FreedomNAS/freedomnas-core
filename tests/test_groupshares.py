@@ -61,8 +61,12 @@ def test_a_directory_that_is_not_a_dataset_cannot_be_a_group_share(monkeypatch):
 
 
 class Shares:
-    def __init__(self, shares):
+    def __init__(self, shares, users=()):
         self.smb = shares
+        self.users = list(users)
+
+    def get_users(self):
+        return self.users
 
     def get_smb_shares(self):
         return self.smb
@@ -75,7 +79,7 @@ def test_an_app_is_let_in_and_recorded_on_a_group_share():
     config, engine = Shares([{"name": "media", "path": "/tank/media", "group": "media"}]), FakeEngine()
     assert groupshares.add_app(engine, config, "/tank/media", "jellyfin", "1005", False)
     assert engine.calls == [("acl_user_read", {"user": "1005", "path": "/tank/media"})]
-    assert config.smb[0]["apps"] == [{"app": "jellyfin", "account": "1005", "write": False}]
+    assert config.smb[0]["apps"] == [{"app": "jellyfin", "account": "1005", "write": False, "granted": "read"}]
     assert not groupshares.add_app(engine, config, "/tank/other", "jellyfin", "1005", False)
 
 
@@ -90,3 +94,18 @@ def test_a_removed_app_leaves_the_acl_unless_another_app_needs_the_same_entry():
     groupshares.remove_app(engine, config, "nextcloud")
     assert engine.calls == [("acl_user_write_remove", {"user": "33", "path": "/tank/media"})]
     assert [a["app"] for a in config.smb[0]["apps"]] == ["jellyfin2"]
+
+
+def test_an_app_running_as_a_member_gets_the_member_s_rights():
+    config = Shares([{"name": "media", "path": "/home/sarah/Video", "group": "media"}],
+                    users=[{"username": "sarah", "uid": 1001, "groups": ["media"]}])
+    engine = FakeEngine()
+    groupshares.add_app(engine, config, "/home/sarah/Video", "jellyfin", "1001", False)
+    assert engine.calls == [("acl_user_write", {"user": "1001", "path": "/home/sarah/Video"})]
+    assert config.smb[0]["apps"][0]["granted"] == "write"
+    config.users[0]["groups"] = []
+    engine.calls.clear()
+    groupshares._apply_apps(engine, config, "media")
+    assert engine.calls == [("acl_user_write_remove", {"user": "1001", "path": "/home/sarah/Video"}),
+                            ("acl_user_read", {"user": "1001", "path": "/home/sarah/Video"})]
+    assert config.smb[0]["apps"][0]["granted"] == "read"

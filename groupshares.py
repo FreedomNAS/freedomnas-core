@@ -90,6 +90,8 @@ def set_members(engine, config, group: str, wanted) -> List[str]:
         elif name not in wanted and group in groups:
             engine.execute("users", "remove_from_group", group=group, username=name)
             config.add_user({**user, "groups": [g for g in groups if g != group]})
+    for share in [s for s in config.get_smb_shares() if s.get("group") == group and s.get("apps")]:
+        _apply_apps(engine, config, share["name"])
     return sorted(wanted)
 
 
@@ -186,10 +188,39 @@ def add_app(engine, config, path: str, app: str, account: str, write: bool) -> b
     share = share_at(config, path)
     if share is None:
         return False
-    grant(engine, path, account, write)
     apps = [a for a in share.get("apps") or [] if a.get("app") != app]
     config.add_smb_share({**share, "apps": apps + [{"app": app, "account": account, "write": write}]})
+    _apply_apps(engine, config, share["name"])
     return True
+
+
+def _member_account(config, group: str, account: str) -> bool:
+    return any(group in (u.get("groups") or []) and account in (u.get("username"), str(u.get("uid", "")))
+               for u in config.get_users())
+
+
+def _apply_apps(engine, config, share_name: str) -> None:
+    """
+    Give each app of the share its ACL entry. An entry for one account
+    stands before the group's for that account, so an app running as a
+    member of the group (Jellyfin as the NAS's own user) gets the member's
+    read and write: a read-only entry would take writing away from the
+    person too. The app's mount stays read only where the recipe says so.
+    What was granted is recorded ("granted"), for a restore and a removal.
+    """
+    share = next(s for s in config.get_smb_shares() if s.get("name") == share_name)
+    entries = []
+    for entry in share.get("apps") or []:
+        write = bool(entry.get("write")) or _member_account(config, share["group"], entry["account"])
+        if entry.get("granted") == "write" and not write:
+            revoke(engine, share["path"], entry["account"], True)
+        grant(engine, share["path"], entry["account"], write)
+        entries.append({**entry, "granted": "write" if write else "read"})
+    config.add_smb_share({**share, "apps": entries})
+
+
+def _granted_write(entry: Dict) -> bool:
+    return entry.get("granted", "write" if entry.get("write") else "read") == "write"
 
 
 def remove_app(engine, config, app: str) -> None:
@@ -201,9 +232,9 @@ def remove_app(engine, config, app: str) -> None:
             continue
         rest = [a for a in entries if a.get("app") != app]
         for entry in mine:
-            if not any((a["account"], bool(a.get("write"))) == (entry["account"], bool(entry.get("write")))
+            if not any((a["account"], _granted_write(a)) == (entry["account"], _granted_write(entry))
                        for a in rest):
-                revoke(engine, share["path"], entry["account"], bool(entry.get("write")))
+                revoke(engine, share["path"], entry["account"], _granted_write(entry))
         config.add_smb_share({**share, "apps": rest})
 
 
@@ -226,5 +257,5 @@ def restore(engine, share: Dict) -> Optional[str]:
         engine.execute("directories", "acl_group_remove", group=old, path=path, timeout=3600, check=False)
     give_to_group(engine, path, group)
     for entry in share.get("apps") or []:
-        grant(engine, path, entry["account"], bool(entry.get("write")))
+        grant(engine, path, entry["account"], _granted_write(entry))
     return f"{path} given to the group {group}"
