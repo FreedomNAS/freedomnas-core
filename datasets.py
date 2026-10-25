@@ -250,7 +250,7 @@ def destroy(engine, name: str, recursive: bool = False) -> None:
 # handed over, never what is inside it nor any other directory.
 # ---------------------------------------------------------------------------
 
-OWNER_MODE = "0700"
+OWNER_MODE = "00700"
 
 
 def dataset_mounted_at(engine, path: str) -> Optional[str]:

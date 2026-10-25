@@ -38,6 +38,7 @@ def prepare(engine) -> None:
                 "   usershare max shares = 100\n"
                 "   usershare allow guests = no\n"
             )
+    group_settings(engine)
     engine.execute("samba", "usershare_prepare", path=usershare_path)
     # Samba reads [global] when it starts, and FreeBSD's samba package ships
     # no smb4.conf at all, so it did not start at boot: start it now with
@@ -47,3 +48,25 @@ def prepare(engine) -> None:
                        service_name=engine.get_profile_value("samba", "smb_service"), check=False)
     except (CommandExecutionError, CommandTranslationError):
         pass
+
+
+def group_settings(engine) -> bool:
+    """
+    The [global] settings a group share needs (`samba.group_share_settings`),
+    appended once when smb.conf lacks them. On Linux, Samba's default masks
+    leave the group read-only on every new file whatever the directory's ACL
+    says; FreeBSD's ZFS ACLs need none. Returns whether smb.conf changed.
+    """
+    lines = engine.get_profile_value("samba", "group_share_settings")
+    smb_conf = engine.get_profile_value("samba", "config_file")
+    try:
+        with open(smb_conf) as f:
+            current = f.read()
+    except FileNotFoundError:
+        current = ""
+    missing = [line for line in lines if line not in current]
+    if not missing:
+        return False
+    with open(smb_conf, "a") as f:
+        f.write("\n[global]\n" + "".join(f"   {line}\n" for line in missing))
+    return True

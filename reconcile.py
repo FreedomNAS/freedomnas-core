@@ -31,7 +31,7 @@ try:
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas.package_manager import admin_groups_present
-    from freedomnas import netconfig, netnames, shadow, usershares, wireguard
+    from freedomnas import groupshares, netconfig, netnames, shadow, usershares, wireguard
     from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
     from engine import (  # type: ignore[no-redef]
@@ -47,6 +47,7 @@ except ImportError:
     import shadow  # type: ignore[no-redef]
     import wireguard  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
+    import groupshares  # type: ignore[no-redef]
     from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -323,6 +324,10 @@ class ReconciliationEngine:
                 kind = "ensure" if pool["name"] in imported else "add"
                 changes.append(Change(f"storage.pools.{pool['name']}", None, pool, kind))
 
+        for share in desired.get("smb_shares", []):
+            if share.get("group") and share.get("path"):
+                changes.append(Change(f"share_groups.{share['name']}", None, share, "ensure"))
+
         self._owned_paths = {}
         for share in desired.get("smb_shares", []) + desired.get("nfs_shares", []):
             owner, path = share.get("owner"), share.get("path")
@@ -490,6 +495,9 @@ class ReconciliationEngine:
                     results.append(self._do_pool_import(change.new_value))
                 if results[-1].target_state == "applied":
                     results.extend(self._do_pool_acltype(change.new_value))
+
+            elif path.startswith("share_groups."):
+                results.extend(self._do_share_group(change.new_value))
 
             elif path.startswith("users."):
                 if kind in ("add", "ensure"):
@@ -935,6 +943,22 @@ class ReconciliationEngine:
             logger.error("Could not give %s the group %s: %s", path, want, exc)
             return [ActionResult(action="directories.group_set_recursive", params=params,
                                  target_state="failed", error=str(exc))]
+
+    def _do_share_group(self, share: dict) -> List[ActionResult]:
+        """
+        A group share's group exists before the accounts that belong to it
+        are created, and its directory carries that group (groupshares.restore).
+        """
+        params = {"group": share["group"], "path": share["path"]}
+        try:
+            done = groupshares.restore(self.engine, share)
+            if not done:
+                return []
+            logger.info("Group share %s: %s", share["name"], done)
+            return [ActionResult(action="groupshares.restore", params=params, target_state="applied")]
+        except (CommandExecutionError, CommandTranslationError, groupshares.datasets.DatasetProblem) as exc:
+            logger.error("Could not restore the group share %s: %s", share["name"], exc)
+            return [ActionResult(action="groupshares.restore", params=params, target_state="failed", error=str(exc))]
 
     def _owner_mismatch(self, path: str, owner: str) -> Optional[str]:
         try:
