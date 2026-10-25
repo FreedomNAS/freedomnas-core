@@ -242,8 +242,9 @@ def restore(engine, share: Dict) -> Optional[str]:
     """
     Bring a recorded group share's directory back after a restore: the
     group is created here with a number of its own, so a directory whose
-    group is not that name (it shows the old number) is given to it again,
-    with its apps. The old number's entries leave the ACL: whatever group
+    group is not that name (it shows the old number), or that lost the
+    group's ACL entry (another edition's kind of ACL: FreeBSD's NFSv4 ones
+    mean nothing to Linux), is given to it again, with its apps. The old number's entries leave the ACL: whatever group
     gets that number later must not find the files open to it. Returns
     what was done, or None when it already matched.
     """
@@ -251,9 +252,10 @@ def restore(engine, share: Dict) -> Optional[str]:
     ensure_group(engine, group)
     stdout, _ = engine.execute("directories", "group_get", path=path, check=False)
     old = stdout.strip()
-    if old == group:
+    acl, _ = engine.execute("directories", "acl_get", path=path, check=False)
+    if old == group and f"group:{group}:" in acl:
         return None
-    if old:
+    if old and old != group:
         engine.execute("directories", "acl_group_remove", group=old, path=path, timeout=3600, check=False)
     give_to_group(engine, path, group)
     for entry in share.get("apps") or []:

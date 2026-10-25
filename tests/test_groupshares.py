@@ -7,9 +7,10 @@ import groupshares
 
 
 class FakeEngine:
-    def __init__(self, groups=(), directory_group=""):
+    def __init__(self, groups=(), directory_group="", acl=""):
         self.groups = set(groups)
         self.directory_group = directory_group
+        self.acl = acl
         self.calls = []
 
     def get_profile_value(self, category, key):
@@ -24,6 +25,8 @@ class FakeEngine:
             self.groups.add(kw["group"])
         if action == "group_get":
             return self.directory_group, ""
+        if action == "acl_get":
+            return self.acl, ""
         return "", ""
 
     def actions(self):
@@ -42,16 +45,23 @@ SHARE = {"name": "Famiglia", "path": "/tank/foto", "group": "famiglia",
 def test_a_restored_share_gets_its_group_and_its_directory_back():
     engine = FakeEngine(directory_group="1004")
     assert groupshares.restore(engine, SHARE) == "/tank/foto given to the group famiglia"
-    assert engine.actions() == ["group_exists", "group_create", "group_get", "acl_group_remove",
+    assert engine.actions() == ["group_exists", "group_create", "group_get", "acl_get", "acl_group_remove",
                                 "dataset_set", "owner_set", "group_set_recursive", "mode_set",
                                 "acl_group_set", "acl_user_write"]
-    assert engine.calls[3][1]["group"] == "1004"
+    assert engine.calls[4][1]["group"] == "1004"
 
 
 def test_a_share_that_already_matches_is_left_alone():
-    engine = FakeEngine(groups={"famiglia"}, directory_group="famiglia")
+    engine = FakeEngine(groups={"famiglia"}, directory_group="famiglia", acl="group:famiglia:rwx\n")
     assert groupshares.restore(engine, SHARE) is None
-    assert engine.actions() == ["group_exists", "group_get"]
+    assert engine.actions() == ["group_exists", "group_get", "acl_get"]
+
+
+def test_a_share_whose_acl_was_lost_on_another_edition_gets_it_back():
+    engine = FakeEngine(groups={"famiglia"}, directory_group="famiglia", acl="user::rwx\ngroup::rwx\n")
+    assert groupshares.restore(engine, SHARE) == "/tank/foto given to the group famiglia"
+    assert "acl_group_remove" not in engine.actions()
+    assert engine.actions()[-2:] == ["acl_group_set", "acl_user_write"]
 
 
 def test_a_directory_that_is_not_a_dataset_cannot_be_a_group_share(monkeypatch):
