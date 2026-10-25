@@ -3,6 +3,8 @@ Behaviour of the ReconciliationEngine. White-box: it reaches into
 `observe()`, `compute_diff()` and `_do_*` as well as `reconcile()`.
 """
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -994,3 +996,66 @@ def test_a_dry_run_leaves_the_modules_alone(monkeypatch):
     with_modules(monkeypatch, module)
     reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile(dry_run=True)
     assert module.seen is None
+
+
+class PowerEngine(FakeEngine):
+    """An Artix/OpenRC system whose acpid rules live under `tmp`."""
+
+    def __init__(self, tmp, running=""):
+        super().__init__()
+        self.profile_dir = str(Path(__file__).resolve().parents[2] / "freedomnas-profiles")
+        self.os_type, self.init_system = "artix", "openrc"
+        self.running = running
+        self.section = {"category": "power-button", "rule_dir": str(tmp / "events"),
+                        "rule_file": str(tmp / "events" / "freedomnas-power"),
+                        "rule": "event=button/power.*\naction=/bin/sh -c poweroff\n", "service": "acpid"}
+
+    def get_profile_section(self, category):
+        return dict(self.section) if category == "power_button" else {}
+
+    def execute(self, category, action, **kwargs):
+        out = super().execute(category, action, **kwargs)
+        if (category, action) == ("packages", "install"):
+            Path(self.section["rule_dir"]).mkdir()
+        if (category, action) == ("services", "is_running"):
+            return self.running, ""
+        return out
+
+
+def test_the_power_button_step_is_planned_only_where_the_profile_asks_for_it(tmp_path):
+    assert ("system.power_button", "ensure") not in paths(diff({}))
+    assert ("system.power_button", "ensure") in paths(diff({}, engine=PowerEngine(tmp_path)))
+
+
+def test_a_system_without_acpid_gets_it_its_rule_and_the_service(tmp_path):
+    engine = PowerEngine(tmp_path)
+    results = reconciler(engine)._do_power_button()
+    [install] = [kw for c, a, kw in engine.calls if a == "install"]
+    assert install["package_name"] == "acpid acpid-openrc"
+    assert (tmp_path / "events" / "freedomnas-power").read_text() == engine.section["rule"]
+    assert [a for c, a in engine.actions() if c == "services"] == ["enable", "is_running", "start"]
+    assert action_names(results) == ["power_button.install", "power_button.service"]
+
+
+def test_a_system_already_set_up_is_left_running(tmp_path):
+    engine = PowerEngine(tmp_path, running="yes")
+    (tmp_path / "events").mkdir()
+    (tmp_path / "events" / "freedomnas-power").write_text(engine.section["rule"])
+    assert reconciler(engine)._do_power_button() == []
+    assert [a for c, a in engine.actions()] == ["enable", "is_running"]
+
+
+def test_a_changed_rule_restarts_acpid(tmp_path):
+    engine = PowerEngine(tmp_path, running="yes")
+    (tmp_path / "events").mkdir()
+    (tmp_path / "events" / "freedomnas-power").write_text("old\n")
+    reconciler(engine)._do_power_button()
+    assert ("services", "restart") in engine.actions()
+
+
+def test_acpid_disabled_at_boot_stays_off(tmp_path):
+    engine = PowerEngine(tmp_path)
+    (tmp_path / "events").mkdir()
+    config = FakeConfig({"services": {"boot": {"acpid": False}}})
+    reconciler(engine, config)._do_power_button()
+    assert [a for c, a in engine.actions() if c == "services"] == []

@@ -15,6 +15,7 @@ All OS operations delegate to FreedomNASEngine; no subprocess calls here.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import logging
 import time
 import yaml
@@ -30,7 +31,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
-    from freedomnas.package_manager import admin_groups_present
+    from freedomnas.package_manager import PackageManager, admin_groups_present
     from freedomnas import groupshares, netconfig, netnames, shadow, usershares, wireguard
     from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
@@ -41,7 +42,7 @@ except ImportError:
     )
     from config import ConfigurationManager, known_admin_groups, normalize_user  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
-    from package_manager import admin_groups_present  # type: ignore[no-redef]
+    from package_manager import PackageManager, admin_groups_present  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
     import netnames  # type: ignore[no-redef]
     import shadow  # type: ignore[no-redef]
@@ -376,6 +377,9 @@ class ReconciliationEngine:
             enabled = bool(ssh) and not self.config.setup_pending()
             changes.append(Change("system.ssh", None, enabled, "ensure"))
 
+        if self._profile_section("power_button"):
+            changes.append(Change("system.power_button", None, True, "ensure"))
+
         for name, enabled in ((desired.get("services") or {}).get("boot") or {}).items():
             changes.append(Change(f"services.boot.{name}", None,
                                   {"name": name, "enabled": bool(enabled)}, "ensure"))
@@ -484,6 +488,9 @@ class ReconciliationEngine:
 
             elif path == "system.ssh":
                 results.extend(self._do_ssh(change.new_value))
+
+            elif path == "system.power_button":
+                results.extend(self._do_power_button())
 
             elif path == "network.interfaces":
                 results.extend(self._do_network(change.new_value))
@@ -943,6 +950,61 @@ class ReconciliationEngine:
             logger.error("Could not give %s the group %s: %s", path, want, exc)
             return [ActionResult(action="directories.group_set_recursive", params=params,
                                  target_state="failed", error=str(exc))]
+
+    def _profile_section(self, category: str) -> dict:
+        try:
+            return self.engine.get_profile_section(category)
+        except AttributeError:
+            return {}
+
+    def _do_power_button(self) -> List[ActionResult]:
+        """
+        A short press of the power button shuts the NAS down, as on any
+        headless machine. Editions whose system does nothing with it by
+        itself (no systemd-logind) name in `power_button` the acpid that
+        listens for it and the rule FreedomNAS gives it. An install from
+        before gets acpid here once (the `power-button` package category,
+        which the installer puts on new systems), the rule whenever it is
+        missing or different, and acpid running.
+        """
+        section = self._profile_section("power_button")
+        results: List[ActionResult] = []
+        if not Path(section["rule_dir"]).is_dir():
+            try:
+                pm = PackageManager(str(Path(self.engine.profile_dir) / "packages"))
+                packages = pm.get_packages_for_os(section["category"], self.engine.os_type, self.engine.init_system)
+                self.engine.execute("packages", "install", package_name=" ".join(packages), timeout=1800)
+                results.append(ActionResult(action="power_button.install", params={"packages": packages},
+                                            target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError, OSError, ValueError, KeyError) as exc:
+                logger.error("Could not install acpid for the power button: %s", exc)
+                return [ActionResult(action="power_button.install", params={}, target_state="failed",
+                                     error=str(exc))]
+        rule = Path(section["rule_file"])
+        try:
+            changed = not rule.exists() or rule.read_text() != section["rule"]
+            if changed:
+                rule.write_text(section["rule"])
+        except OSError as exc:
+            return results + [ActionResult(action="power_button.rule", params={"file": str(rule)},
+                                           target_state="failed", error=str(exc))]
+        service = section["service"]
+        if self.config.get_service_boot().get(service) is False:
+            return results
+        params = {"service_name": service}
+        try:
+            self.engine.execute("services", "enable", service_name=service)
+            stdout, _ = self.engine.execute("services", "is_running", check=False, service_name=service)
+            if changed or stdout.strip() != "yes":
+                self.engine.execute("services", "restart" if stdout.strip() == "yes" else "start",
+                                    service_name=service)
+                logger.info("Power button: %s %s", service, "rule written" if changed else "started")
+                results.append(ActionResult(action="power_button.service", params=params, target_state="applied"))
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.error("Could not start %s for the power button: %s", service, exc)
+            results.append(ActionResult(action="power_button.service", params=params, target_state="failed",
+                                        error=str(exc)))
+        return results
 
     def _do_share_group(self, share: dict) -> List[ActionResult]:
         """
