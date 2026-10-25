@@ -58,3 +58,35 @@ def test_a_directory_that_is_not_a_dataset_cannot_be_a_group_share(monkeypatch):
     monkeypatch.setattr(datasets, "dataset_mounted_at", lambda engine, path: None)
     with pytest.raises(datasets.DatasetProblem):
         groupshares.give_to_group(FakeEngine(), "/tank/foto/sub", "famiglia")
+
+
+class Shares:
+    def __init__(self, shares):
+        self.smb = shares
+
+    def get_smb_shares(self):
+        return self.smb
+
+    def add_smb_share(self, share):
+        self.smb = [s for s in self.smb if s["name"] != share["name"]] + [share]
+
+
+def test_an_app_is_let_in_and_recorded_on_a_group_share():
+    config, engine = Shares([{"name": "media", "path": "/tank/media", "group": "media"}]), FakeEngine()
+    assert groupshares.add_app(engine, config, "/tank/media", "jellyfin", "1005", False)
+    assert engine.calls == [("acl_user_read", {"user": "1005", "path": "/tank/media"})]
+    assert config.smb[0]["apps"] == [{"app": "jellyfin", "account": "1005", "write": False}]
+    assert not groupshares.add_app(engine, config, "/tank/other", "jellyfin", "1005", False)
+
+
+def test_a_removed_app_leaves_the_acl_unless_another_app_needs_the_same_entry():
+    config = Shares([{"name": "media", "path": "/tank/media", "group": "media", "apps": [
+        {"app": "jellyfin", "account": "1005", "write": False},
+        {"app": "jellyfin2", "account": "1005", "write": False},
+        {"app": "nextcloud", "account": "33", "write": True}]}])
+    engine = FakeEngine()
+    groupshares.remove_app(engine, config, "jellyfin")
+    assert engine.calls == []
+    groupshares.remove_app(engine, config, "nextcloud")
+    assert engine.calls == [("acl_user_write_remove", {"user": "33", "path": "/tank/media"})]
+    assert [a["app"] for a in config.smb[0]["apps"]] == ["jellyfin2"]

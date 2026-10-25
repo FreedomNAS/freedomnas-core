@@ -21,9 +21,10 @@ import re
 from typing import Dict, List, Optional, Set
 
 try:
-    from freedomnas import datasets
+    from freedomnas import datasets, usershares
 except ImportError:  # running from the repository, not from the package
     import datasets  # type: ignore
+    import usershares  # type: ignore
 
 GROUP_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,30}$")
 
@@ -41,7 +42,7 @@ def everyone_groups(config) -> List[str]:
     return sorted({s["group"] for s in config.get_smb_shares() if s.get("group") and s.get("everyone")})
 
 
-def members(config, group: str) -> List[str]:
+def members_of(config, group: str) -> List[str]:
     return [u["username"] for u in config.get_users()
             if u.get("username") and group in (u.get("groups") or [])]
 
@@ -131,6 +132,37 @@ def drop_group(engine, config, group: str) -> None:
     engine.execute("users", "group_delete", group=group, check=False)
 
 
+def create(engine, config, name: str, path: str, group: str, members, everyone: bool = False,
+           read_only: bool = False, comment: Optional[str] = None) -> List[str]:
+    """
+    Make the SMB share `name` of `path` for `group`, with `members` in it
+    (every account when `everyone`), and record it. Returns the members.
+    """
+    wanted = [u["username"] for u in config.get_users() if u.get("username")] if everyone else list(members)
+    check_new_group(engine, config, group)
+    check_accounts(config, wanted)
+    ensure_group(engine, group)
+    give_to_group(engine, path, group)
+    joined = set_members(engine, config, group, set(wanted) | set(members_of(config, group)))
+    usershares.group_settings(engine)
+    acl = f"Unix Group\\{group}:{'R' if read_only else 'F'}"
+    engine.execute("samba", "create_share", share_name=name, path=path, comment=comment or name, acl=acl)
+    engine.execute("samba", "reload_config")
+    config.add_smb_share({"name": name, "path": path, "comment": comment or name, "acl": acl,
+                          "read_only": read_only, "group": group, "everyone": everyone, "guest_ok": False})
+    return joined
+
+
+def forget(engine, config, share: Dict) -> None:
+    """After a group share left the configuration: its directory and, unused, its group."""
+    group = share.get("group")
+    if not group:
+        return
+    take_back(engine, share["path"], group)
+    if group not in share_groups(config):
+        drop_group(engine, config, group)
+
+
 def grant(engine, path: str, account: str, write: bool) -> None:
     engine.execute("directories", "acl_user_write" if write else "acl_user_read",
                    user=account, path=path, timeout=3600)
@@ -139,6 +171,40 @@ def grant(engine, path: str, account: str, write: bool) -> None:
 def revoke(engine, path: str, account: str, write: bool) -> None:
     engine.execute("directories", "acl_user_write_remove" if write else "acl_user_read_remove",
                    user=account, path=path, timeout=3600, check=False)
+
+
+def share_at(config, path: str) -> Optional[Dict]:
+    return next((s for s in config.get_smb_shares() if s.get("group") and s.get("path") == path), None)
+
+
+def add_app(engine, config, path: str, app: str, account: str, write: bool) -> bool:
+    """
+    Let the app `app`, running as `account` (a name or a number), read the
+    group share of `path`, or write it too, and record it so a restore gives
+    it back. False when `path` is no group share.
+    """
+    share = share_at(config, path)
+    if share is None:
+        return False
+    grant(engine, path, account, write)
+    apps = [a for a in share.get("apps") or [] if a.get("app") != app]
+    config.add_smb_share({**share, "apps": apps + [{"app": app, "account": account, "write": write}]})
+    return True
+
+
+def remove_app(engine, config, app: str) -> None:
+    """The app is gone: its entries leave the shares' ACLs, unless another app shares them."""
+    for share in list(config.get_smb_shares()):
+        entries = share.get("apps") or []
+        mine = [a for a in entries if a.get("app") == app]
+        if not mine:
+            continue
+        rest = [a for a in entries if a.get("app") != app]
+        for entry in mine:
+            if not any((a["account"], bool(a.get("write"))) == (entry["account"], bool(entry.get("write")))
+                       for a in rest):
+                revoke(engine, share["path"], entry["account"], bool(entry.get("write")))
+        config.add_smb_share({**share, "apps": rest})
 
 
 def restore(engine, share: Dict) -> Optional[str]:
@@ -159,6 +225,6 @@ def restore(engine, share: Dict) -> Optional[str]:
     if old:
         engine.execute("directories", "acl_group_remove", group=old, path=path, timeout=3600, check=False)
     give_to_group(engine, path, group)
-    for app in share.get("apps") or []:
-        grant(engine, path, app["account"], bool(app.get("write")))
+    for entry in share.get("apps") or []:
+        grant(engine, path, entry["account"], bool(entry.get("write")))
     return f"{path} given to the group {group}"
