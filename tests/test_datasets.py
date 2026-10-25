@@ -184,3 +184,28 @@ def test_a_dataset_holding_home_is_neither_moved_nor_destroyed():
         with pytest.raises(DatasetProblem, match="system directory"):
             call()
     assert not {"dataset_destroy_recursive", "dataset_set", "dataset_rename"} & set(engine.actions())
+
+
+class MountEngine:
+    """One dataset and its mountpoint, for dataset_mounted_at."""
+
+    def __init__(self, name, mountpoint):
+        self.name, self.mountpoint = name, mountpoint
+
+    def execute(self, category, action, timeout=30, check=True, **kw):
+        if action == "dataset_at_path":
+            if kw["path"] == "/":
+                return "rpool/ROOT", ""
+            return (self.name if kw["path"] == self.mountpoint.rstrip("/") else ""), ""
+        if action == "dataset_get_property":
+            return f"{self.mountpoint}\tlocal", ""
+        return "", ""
+
+
+@pytest.mark.parametrize("mountpoint, shared", [
+    ("/home/sarah/Video/", True), ("/home/sarah/Video", True), ("/home/sarah/media/Film", True),
+    ("/home/sarah", False), ("/home", False), ("/usr/local/media", False), ("/tank/media/", True)])
+def test_a_dataset_inside_a_home_may_be_shared_but_not_a_home(mountpoint, shared):
+    engine = MountEngine("mainpool/x", mountpoint)
+    found = datasets.dataset_mounted_at(engine, mountpoint.rstrip("/") or "/")
+    assert (found == "mainpool/x") is shared

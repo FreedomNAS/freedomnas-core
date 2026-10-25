@@ -253,10 +253,18 @@ def destroy(engine, name: str, recursive: bool = False) -> None:
 OWNER_MODE = "00700"
 
 
+def _in_a_home(mountpoint: str) -> bool:
+    """/home/<user>/<folder> and deeper: an account's own data, not /home or a home itself."""
+    parts = mountpoint.strip("/").split("/")
+    return len(parts) >= 3 and parts[0] == "home"
+
+
 def dataset_mounted_at(engine, path: str) -> Optional[str]:
     """
     The dataset whose own mountpoint is `path` and that may change hands, or
-    None: a subdirectory, a system directory or a protected dataset.
+    None: a subdirectory, a system directory or a protected dataset. A
+    dataset mounted inside a home (/home/sarah/Video, on a desktop that
+    became a NAS) is an account's data and may be shared like any other.
     """
     path = posixpath.normpath(path) if path.startswith("/") else ""
     if not path:
@@ -272,7 +280,8 @@ def dataset_mounted_at(engine, path: str) -> Optional[str]:
         mountpoint, _ = mountpoint_of(engine, name)
     except (CommandExecutionError, CommandTranslationError):
         return None
-    if mountpoint != path or protected_reason(name, root_pool(engine), mountpoint):
+    mountpoint = posixpath.normpath(mountpoint) if mountpoint.startswith("/") else mountpoint
+    if mountpoint != path or protected_reason(name, root_pool(engine), "" if _in_a_home(mountpoint) else mountpoint):
         return None
     return name
 
