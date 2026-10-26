@@ -963,6 +963,9 @@ def with_modules(monkeypatch, *modules, error=None):
         def instances(self):
             return [({"id": m.name}, m) for m in modules]
 
+        def discover(self):
+            return [{"id": m.name} for m in modules]
+
     monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
 
 
@@ -1059,3 +1062,46 @@ def test_acpid_disabled_at_boot_stays_off(tmp_path):
     config = FakeConfig({"services": {"boot": {"acpid": False}}})
     reconciler(engine, config)._do_power_button()
     assert [a for c, a in engine.actions() if c == "services"] == []
+
+
+class ModulesEngine(FakeEngine):
+    def __init__(self, offered):
+        super().__init__()
+        self.offered = offered
+
+    def execute(self, category, action, **kwargs):
+        out = super().execute(category, action, **kwargs)
+        if (category, action) == ("packages", "module_search"):
+            return "".join(f"{p}\t1.0\tdesc\n" for p in self.offered), ""
+        return out
+
+
+def test_a_module_the_configuration_names_but_the_system_lacks_is_installed(monkeypatch):
+    class Loader:
+        def __init__(self, engine, config):
+            pass
+
+        def discover(self):
+            return [{"id": "containers"}]
+
+    monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
+    engine = ModulesEngine(["freedomnas-module-containers", "freedomnas-module-proxy"])
+    results = reconciler(engine)._install_modules(
+        {"containers": {"enabled": True}, "proxy": {"enabled": True}, "gone": {"enabled": True}, "empty": {}})
+    installs = [kw for c, a, kw in engine.calls if a == "install"]
+    assert installs == [{"package_name": "freedomnas-module-proxy", "timeout": 7200}]
+    assert [(r.params["module"], r.target_state) for r in results] == [("gone", "skipped"), ("proxy", "applied")]
+
+
+def test_nothing_is_installed_when_every_module_is_there(monkeypatch):
+    class Loader:
+        def __init__(self, engine, config):
+            pass
+
+        def discover(self):
+            return [{"id": "proxy"}]
+
+    monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
+    engine = ModulesEngine(["freedomnas-module-proxy"])
+    assert reconciler(engine)._install_modules({"proxy": {"enabled": True}}) == []
+    assert engine.calls == []

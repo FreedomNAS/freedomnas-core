@@ -10,6 +10,7 @@ Provides utilities to:
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -254,3 +255,21 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"Error: {e}")
+
+
+MODULE_PACKAGE = re.compile(r"(?:[a-z0-9][a-z0-9+_.-]*/)?freedomnas-module-([a-z0-9][a-z0-9_-]{0,62})")
+
+
+def module_packages(engine, action: str = "module_search") -> Dict[str, str]:
+    """
+    The community modules the edition's repositories offer (module_search)
+    or the system has (module_installed), as {module id: package name}:
+    the profile prints one name<TAB>version<TAB>description line each.
+    """
+    stdout, _ = engine.execute("packages", action, timeout=300, check=False)
+    found = {}
+    for line in stdout.splitlines():
+        match = MODULE_PACKAGE.fullmatch(line.split("\t", 1)[0].strip())
+        if match:
+            found[match.group(1)] = line.split("\t", 1)[0].strip()
+    return found

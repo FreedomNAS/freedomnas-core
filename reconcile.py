@@ -31,7 +31,7 @@ try:
     )
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
-    from freedomnas.package_manager import PackageManager, admin_groups_present
+    from freedomnas.package_manager import PackageManager, admin_groups_present, module_packages
     from freedomnas import groupshares, netconfig, netnames, shadow, usershares, wireguard
     from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
     )
     from config import ConfigurationManager, known_admin_groups, normalize_user  # type: ignore[no-redef]
     from datasets import nfs_export_options, owner_group  # type: ignore[no-redef]
-    from package_manager import PackageManager, admin_groups_present  # type: ignore[no-redef]
+    from package_manager import PackageManager, admin_groups_present, module_packages  # type: ignore[no-redef]
     import netconfig  # type: ignore[no-redef]
     import netnames  # type: ignore[no-redef]
     import shadow  # type: ignore[no-redef]
@@ -184,6 +184,7 @@ class ReconciliationEngine:
             ]
         results = self._apply_changes(changes)
         desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
+        results.extend(self._install_modules(desired.get("modules") or {}))
         results.extend(self._reconcile_modules(desired.get("modules") or {}, parse_mode(mode)))
         return results
 
@@ -541,6 +542,47 @@ class ReconciliationEngine:
                 else:
                     results.append(self._do_nfs_share_create(change.new_value))
 
+        return results
+
+    def _install_modules(self, sections: dict) -> List[ActionResult]:
+        """
+        A module the configuration has a section for but this system lacks
+        (a fresh install restored from its pool, another edition) has its
+        package installed from the edition's repositories, as the Plugins
+        page would, so that it is loaded and reconciled right after.
+        """
+        wanted = {module_id for module_id, section in sections.items() if isinstance(section, dict) and section}
+        try:
+            present = {m.get("id") for m in ModuleLoader(self.engine, self.config).discover()}
+        except (ModuleLoaderException, OSError) as exc:
+            logger.error("Modules not checked: %s", exc)
+            return []
+        missing = sorted(wanted - present)
+        if not missing:
+            return []
+        try:
+            self.engine.execute("packages", "update_cache", timeout=3600, check=False)
+            offered = module_packages(self.engine)
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            return [ActionResult(action="modules.install", params={"modules": missing}, target_state="failed",
+                                 error=str(exc))]
+        results: List[ActionResult] = []
+        for module_id in missing:
+            params = {"module": module_id}
+            package = offered.get(module_id)
+            if not package:
+                results.append(ActionResult(action="modules.install", params=params, target_state="skipped",
+                                            error=f"the repositories of this edition have no module {module_id}"))
+                continue
+            params["package"] = package
+            try:
+                self.engine.execute("packages", "install", package_name=package, timeout=7200)
+                logger.info("Module %s installed (%s)", module_id, package)
+                results.append(ActionResult(action="modules.install", params=params, target_state="applied"))
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("Could not install module %s: %s", module_id, exc)
+                results.append(ActionResult(action="modules.install", params=params, target_state="failed",
+                                            error=str(exc)))
         return results
 
     def _reconcile_modules(self, sections: dict, mode: ReconcileMode) -> List[ActionResult]:
