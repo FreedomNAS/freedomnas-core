@@ -72,7 +72,70 @@ CONFIG_NAME = "config.yaml"
 ROLE_PROPERTY = "org.freedomnas:role"
 NETWORK_MARKER = "network-reapply"
 
+IDENTITY_DIR = "identity"
+
 _ERRORS = (CommandExecutionError, CommandTranslationError)
+
+
+def _identity_dirs(engine) -> Dict[str, Path]:
+    """
+    Where the parts of this NAS's identity live, by their folder in the
+    copies: FreedomNAS's certificate authority (ca.pem, ca-key.pem), which
+    every device was told to trust, and the SSH host keys clients have
+    recorded. Passwords are not among them: a restored system asks for new
+    ones.
+    """
+    dirs = {"tls": paths.tls_dir(engine)}
+    try:
+        dirs["ssh"] = Path(engine.get_profile_value("system", "ssh_host_key_dir"))
+    except _ERRORS:
+        pass
+    return dirs
+
+
+_IDENTITY_FILES = {"tls": ("ca.pem", "ca-key.pem"), "ssh": ("ssh_host_*_key", "ssh_host_*_key.pub")}
+
+
+def _save_identity(engine, mountpoint: Path) -> None:
+    folder = mountpoint / IDENTITY_DIR
+    for part, source_dir in _identity_dirs(engine).items():
+        for pattern in _IDENTITY_FILES[part]:
+            for source in sorted(source_dir.glob(pattern)):
+                target = folder / part / source.name
+                if target.is_file() and target.read_bytes() == source.read_bytes():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                folder.chmod(0o700)
+                target.parent.chmod(0o700)
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+
+
+def _restore_identity(engine, mountpoint: Path) -> List[str]:
+    """
+    Put the identity a copy carries back in place (a reinstall), the public
+    halves readable as the originals were; the SSH service is restarted with
+    its keys. Returns what was restored.
+    """
+    folder = mountpoint / IDENTITY_DIR
+    restored = []
+    for part, target_dir in _identity_dirs(engine).items():
+        for pattern in _IDENTITY_FILES[part]:
+            for source in sorted((folder / part).glob(pattern)):
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = target_dir / source.name
+                shutil.copyfile(source, target)
+                target.chmod(0o644 if source.name.endswith((".pub", "ca.pem")) else 0o600)
+                restored.append(f"{part}/{source.name}")
+    if any(name.startswith("ssh/") for name in restored):
+        try:
+            engine.execute("services", "restart", check=False,
+                           service_name=engine.get_profile_value("system", "ssh_service"))
+        except _ERRORS as exc:
+            logger.warning("SSH not restarted with its restored keys: %s", exc)
+    if restored:
+        logger.info("Restored this NAS's identity: %s", ", ".join(restored))
+    return restored
 
 
 def _pools(engine) -> List[str]:
@@ -285,6 +348,7 @@ def _copy_into(engine, dataset: str, source: Path) -> Dict:
     try:
         with _mounted(engine, dataset) as mountpoint:
             shutil.copy2(source, mountpoint / CONFIG_NAME)
+            _save_identity(engine, mountpoint)
         result["copied"] = True
         logger.info("Mirrored the configuration to %s", dataset)
     except _ERRORS as exc:
@@ -537,6 +601,7 @@ def boot(engine) -> Dict:
         pool, _ = externals[0]
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
             shutil.copy2(mountpoint / CONFIG_NAME, config_path)
+            result["identity"] = _restore_identity(engine, mountpoint)
         restored = _load(config_path)
         changed = _local_ids(engine, restored)
         if (restored.get("system") or {}).get("edition") != engine.os_type:

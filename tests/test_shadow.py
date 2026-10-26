@@ -6,6 +6,8 @@ this install, and brings back a reinstall.
 
 from pathlib import Path
 
+import shutil
+
 import pytest
 import yaml
 
@@ -35,8 +37,15 @@ class Zfs:
         self.passwd = {}
         self.cards = []
         self.profile = {"paths": {"config_dir": str(tmp_path)}}
+        self.values = {}
         if active:
             self._mount_state(active)
+
+    def get_profile_value(self, category, key):
+        try:
+            return self.values[(category, key)]
+        except KeyError:
+            raise shadow.CommandTranslationError(f"{category}.{key}")
 
     def _mount_state(self, dataset):
         self.hidden = {f.name: f.read_bytes() for f in self.state.iterdir()}
@@ -87,15 +96,17 @@ class Zfs:
             if kw["dataset"] in self.fail_mount:
                 raise shadow.CommandExecutionError("cannot mount")
             for name, data in self.datasets[kw["dataset"]]["files"].items():
+                (Path(kw["mountpoint"]) / name).parent.mkdir(parents=True, exist_ok=True)
                 (Path(kw["mountpoint"]) / name).write_bytes(data)
             self.mounted_at[kw["mountpoint"]] = kw["dataset"]
             return "", ""
         if action == "unmount_at":
             dataset = self.mounted_at.pop(kw["mountpoint"])
             directory = Path(kw["mountpoint"])
-            self.datasets[dataset]["files"] = {f.name: f.read_bytes() for f in directory.iterdir()}
+            self.datasets[dataset]["files"] = {str(f.relative_to(directory)): f.read_bytes()
+                                               for f in directory.rglob("*") if f.is_file()}
             for f in directory.iterdir():
-                f.unlink()
+                shutil.rmtree(f) if f.is_dir() else f.unlink()
             return "", ""
         if action == "mount_dataset":
             if kw["dataset"] in self.fail_mount:
@@ -113,6 +124,9 @@ class Zfs:
             return "", ""
         if action == "dataset_destroy":
             self.destroyed.append(kw["dataset"])
+            return "", ""
+        if (category, action) == ("services", "restart"):
+            self.restarted = kw["service_name"]
             return "", ""
         raise AssertionError(f"unexpected call: {category}.{action}")
 
@@ -516,3 +530,39 @@ def test_a_change_mirrored_after_saving_survives_the_next_boot(tmp_path):
     zfs._unmount_state()
     shadow.boot(zfs)
     assert yaml.safe_load((zfs.state / "config.yaml").read_text())["modules"]["proxy"] == {"enabled": False}
+
+
+def test_the_nas_identity_travels_with_the_copy_and_comes_back_on_a_reinstall(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)}, "tank/.freedomnas": {}},
+              active="rpool/.freedomnas")
+    ssh = tmp_path / "ssh"
+    ssh.mkdir()
+    zfs.values = {("system", "ssh_host_key_dir"): str(ssh), ("system", "ssh_service"): "sshd"}
+    tls = tmp_path / "tls"
+    tls.mkdir()
+    (tls / "ca.pem").write_text("CA CERT")
+    (tls / "ca-key.pem").write_text("CA KEY")
+    (tls / "key.pem").write_text("server key, not part of it")
+    (ssh / "ssh_host_ed25519_key").write_text("HOST KEY")
+    (ssh / "ssh_host_ed25519_key.pub").write_text("HOST PUB")
+
+    shadow.sync(zfs, str(zfs.state / "config.yaml"))
+    kept = zfs.datasets["tank/.freedomnas"]["files"]
+    assert {k for k in kept if k.startswith("identity/")} == {
+        "identity/tls/ca.pem", "identity/tls/ca-key.pem",
+        "identity/ssh/ssh_host_ed25519_key", "identity/ssh/ssh_host_ed25519_key.pub"}
+
+    for f in (tls / "ca.pem", tls / "ca-key.pem", ssh / "ssh_host_ed25519_key"):
+        f.write_text("made by the fresh install")
+    zfs._unmount_state()
+    del zfs.datasets["rpool/.freedomnas"]
+    zfs.datasets["rpool/.freedomnas"] = {"mountpoint": str(zfs.state), "files": {}}
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+    result = shadow.boot(zfs)
+
+    assert result["action"] == "restored"
+    assert (tls / "ca-key.pem").read_text() == "CA KEY" and (ssh / "ssh_host_ed25519_key").read_text() == "HOST KEY"
+    assert oct((tls / "ca-key.pem").stat().st_mode & 0o777) == "0o600"
+    assert oct((ssh / "ssh_host_ed25519_key.pub").stat().st_mode & 0o777) == "0o644"
+    assert "ssh/ssh_host_ed25519_key" in result["identity"]
+    assert zfs.restarted == "sshd"
