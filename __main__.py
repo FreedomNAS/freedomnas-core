@@ -304,10 +304,24 @@ def cmd_path(args) -> int:
             "tls":          paths.tls_dir,
             "keyslots":     paths.keyslot_dir,
             "setup-pending": lambda: paths.config_dir() / "setup-pending",
+            "restoring":    lambda: paths.state_dir() / "restoring.json",
         }[args.name]
         print(resolve())
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_restore_begin(args) -> int:
+    try:
+        from freedomnas import restoring
+    except ImportError:
+        import restoring  # type: ignore
+    try:
+        restoring.begin(restoring.lock_file(), args.reason)
+    except OSError as exc:
+        print(f"ERROR: could not write the restore lock: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -331,6 +345,13 @@ def cmd_reconcile(args) -> int:
         print(f"ERROR: could not initialise reconciler: {exc}", file=sys.stderr)
         return 1
 
+    if args.progress and not args.dry_run:
+        try:
+            from freedomnas import restoring
+        except ImportError:
+            import restoring  # type: ignore
+        reconciler.progress = restoring.Progress(restoring.lock_file(engine))
+
     results = reconciler.reconcile(desired_path=args.desired, mode=args.mode, dry_run=args.dry_run)
 
     if args.dry_run:
@@ -350,6 +371,8 @@ def cmd_reconcile(args) -> int:
             failed += 1
 
     print(f"\n{len(results)} action(s), {failed} failure(s).")
+    if reconciler.progress:
+        reconciler.progress.finish([f"{r.action}: {r.error}" for r in results if r.target_state == "failed"])
     return 1 if failed else 0
 
 
@@ -457,6 +480,11 @@ def main() -> int:
              "additive: add and change only. disaster_recovery is the old name of declarative",
     )
     reconcile_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Write each step into the restore lock (<state>/restoring.json) for the WebUI's restore page",
+    )
+    reconcile_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the steps without applying any",
@@ -504,7 +532,13 @@ def main() -> int:
         help="Issue the certificate again only for a missing name, not for a new address",
     )
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
-    path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending"])
+    path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending",
+                                              "restoring"])
+    begin_parser = sub.add_parser(
+        "restore-begin",
+        help="Put the restore lock in place: the WebUI serves only the restore page until it is gone",
+    )
+    begin_parser.add_argument("--reason", default="", help="Why (restored, reinitialized, interrupted)")
     sub.add_parser(
         "boot-ok",
         help="Confirm the boot: ends a new kernel's trial before an automatic rollback",
@@ -520,6 +554,7 @@ def main() -> int:
         "unlock-pools": cmd_unlock_pools,
         "grow-root-pool": cmd_grow_root_pool,
         "reconcile":    cmd_reconcile,
+        "restore-begin": cmd_restore_begin,
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
         "shadow-sync":  cmd_shadow_sync,

@@ -32,7 +32,7 @@ try:
     from freedomnas.config import ConfigurationManager, known_admin_groups, normalize_user
     from freedomnas.datasets import nfs_export_options, owner_group
     from freedomnas.package_manager import PackageManager, admin_groups_present, module_packages
-    from freedomnas import groupshares, netconfig, netnames, shadow, usershares, wireguard
+    from freedomnas import groupshares, netconfig, netnames, restoring, shadow, usershares, wireguard
     from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
 except ImportError:
     from engine import (  # type: ignore[no-redef]
@@ -49,6 +49,7 @@ except ImportError:
     import wireguard  # type: ignore[no-redef]
     import usershares  # type: ignore[no-redef]
     import groupshares  # type: ignore[no-redef]
+    import restoring  # type: ignore[no-redef]
     from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.Reconciler")
@@ -125,14 +126,14 @@ def _in_after_order(pairs: list) -> list:
     module that uses another's work (the containers writing sites for the
     proxy it installs) finds it done. A loop keeps the given order.
     """
-    present = {manifest.get("id", module.name) for manifest, module in pairs}
+    present = {(manifest.get("id") or module.name) for manifest, module in pairs}
     pending, ordered, done = list(pairs), [], set()
     while pending:
         ready = next((i for i, (manifest, _) in enumerate(pending)
                       if not (set(manifest.get("after") or []) & present) - done), 0)
         manifest, module = pending.pop(ready)
         ordered.append((manifest, module))
-        done.add(manifest.get("id", module.name))
+        done.add((manifest.get("id") or module.name))
     return ordered
 
 
@@ -169,6 +170,8 @@ class ReconciliationEngine:
         # owner -> the share paths given to them, from the last compute_diff:
         # where a user's ID can be read back when the configuration has none.
         self._owned_paths: Dict[str, List[str]] = {}
+        self.progress = None
+        self._module_steps: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,11 +203,38 @@ class ReconciliationEngine:
                 ActionResult(action=c.path, params={"change": c.change_type}, target_state="planned")
                 for c in changes
             ]
+        self._plan_progress(changes)
         results = self._apply_changes(changes)
         desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
-        results.extend(self._install_modules(desired.get("modules") or {}))
+        installing = len(changes)
+        self._step_start(installing)
+        installed = self._install_modules(desired.get("modules") or {})
+        self._step_done(installing, installed)
+        results.extend(installed)
         results.extend(self._reconcile_modules(desired.get("modules") or {}, parse_mode(mode)))
         return results
+
+    def _plan_progress(self, changes: List[Change]) -> None:
+        if not self.progress:
+            return
+        try:
+            manifests = [m for m in ModuleLoader(self.engine, self.config).discover() if m.get("id")]
+        except (ModuleLoaderException, OSError):
+            manifests = []
+        modules = [m["id"] for m, _ in _in_after_order([(m, None) for m in manifests])]
+        first = len(changes) + 1
+        self._module_steps = {module_id: first + i for i, module_id in enumerate(modules)}
+        self.progress.plan([restoring.step_label(c.path) for c in changes] + ["Modules to install"]
+                           + [f"Module {module_id}" for module_id in modules])
+
+    def _step_start(self, index: int) -> None:
+        if self.progress:
+            self.progress.start(index)
+
+    def _step_done(self, index: int, results: List[ActionResult]) -> None:
+        if self.progress:
+            self.progress.done(index, [f"{r.action}: {r.error}" for r in results
+                                       if r.target_state == "failed"])
 
     def plan(self, desired_path: Optional[str] = None, mode: str = "declarative") -> List[Change]:
         desired = self.load_desired(desired_path) if desired_path else self.config.to_dict()
@@ -497,8 +527,10 @@ class ReconciliationEngine:
         usershares_ready = False
         groups_checked: Set[str] = set()
         self._renumbered = False
-        for change in changes:
+        for index, change in enumerate(changes):
             path, kind = change.path, change.change_type
+            before = len(results)
+            self._step_start(index)
 
             if path == "system.hostname":
                 results.append(self._do_hostname(change.new_value))
@@ -561,6 +593,8 @@ class ReconciliationEngine:
                 else:
                     results.append(self._do_nfs_share_create(change.new_value))
 
+            self._step_done(index, results[before:])
+
         if self._renumbered:
             for change in changes:
                 if change.path.startswith("share_groups."):
@@ -617,12 +651,18 @@ class ReconciliationEngine:
         results: List[ActionResult] = []
         for manifest, module in _in_after_order(pairs):
             module_id = manifest.get("id", module.name)
+            step = self._module_steps.get(module_id)
+            before = len(results)
+            if step is not None:
+                self._step_start(step)
             try:
                 results.extend(module.reconcile(sections.get(module_id) or {}, mode.value) or [])
             except Exception as exc:
                 logger.error("Module %s failed to reconcile: %s", module_id, exc)
                 results.append(ActionResult(
                     action=f"modules.{module_id}", params={}, target_state="failed", error=str(exc)))
+            if step is not None:
+                self._step_done(step, results[before:])
         return results
 
     # ------------------------------------------------------------------

@@ -979,7 +979,7 @@ def with_modules(monkeypatch, *modules, error=None):
                     for m in modules]
 
         def discover(self):
-            return [{"id": m.name} for m in modules]
+            return [m for m, _ in self.instances()]
 
     monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
 
@@ -1161,3 +1161,32 @@ def test_group_shares_are_given_back_once_when_no_number_moved(monkeypatch):
     rec._apply_changes([Change("share_groups.media", None, share, "ensure"),
                         Change("users.sarah", None, {"username": "sarah", "uid": 1002, "gid": 1002}, "add")])
     assert restored == ["media"]
+
+
+class RecordingProgress:
+    def __init__(self):
+        self.calls = []
+
+    def plan(self, labels):
+        self.calls.append(("plan", labels))
+
+    def start(self, index):
+        self.calls.append(("start", index))
+
+    def done(self, index, errors):
+        self.calls.append(("done", index, errors))
+
+
+def test_every_step_reaches_the_restore_lock(monkeypatch):
+    apps = RecordingModule("containers")
+    apps.after = ["broken"]
+    with_modules(monkeypatch, apps, RecordingModule("broken", fail=True))
+    engine = FakeEngine(users={"sarah": ["sudo"]}, hostname="old")
+    config = FakeConfig({"system": {"hostname": "nas"}, "users": [ADMIN]})
+    rec = reconciler(engine, config)
+    rec.progress = RecordingProgress()
+    rec.reconcile()
+    plan = rec.progress.calls[0]
+    assert plan == ("plan", ["Hostname", "Modules to install", "Module broken", "Module containers"])
+    assert ("done", 0, []) in rec.progress.calls and ("done", 3, []) in rec.progress.calls
+    assert ("done", 2, ["modules.broken: broken"]) in rec.progress.calls
