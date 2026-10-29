@@ -961,7 +961,8 @@ def with_modules(monkeypatch, *modules, error=None):
                 raise ModuleLoaderException(error)
 
         def instances(self):
-            return [({"id": m.name}, m) for m in modules]
+            return [({"id": m.name, **({"after": m.after} if getattr(m, "after", None) else {})}, m)
+                    for m in modules]
 
         def discover(self):
             return [{"id": m.name} for m in modules]
@@ -979,6 +980,22 @@ def test_modules_get_their_own_section_after_everything_else(monkeypatch):
     assert action_names(results) == ["system.hostname_set", "containers.done", "other.done"]
     assert apps.seen == ({"apps": ["jellyfin"]}, "additive")
     assert quiet.seen == ({}, "additive")
+
+
+def test_a_module_runs_after_the_modules_its_manifest_names(monkeypatch):
+    apps, proxy, other = RecordingModule("containers"), RecordingModule("proxy"), RecordingModule("other")
+    apps.after = ["proxy", "missing"]
+    with_modules(monkeypatch, apps, other, proxy)
+    results = reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile()
+    assert action_names(results) == ["other.done", "proxy.done", "containers.done"]
+
+
+def test_modules_that_wait_for_each_other_keep_their_order(monkeypatch):
+    one, two = RecordingModule("one"), RecordingModule("two")
+    one.after, two.after = ["two"], ["one"]
+    with_modules(monkeypatch, one, two)
+    results = reconciler(FakeEngine(users={"sarah": ["sudo"]}), FakeConfig({"users": [ADMIN]})).reconcile()
+    assert action_names(results) == ["one.done", "two.done"]
 
 
 def test_a_failing_module_is_reported_and_the_others_still_run(monkeypatch):

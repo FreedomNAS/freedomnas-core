@@ -118,6 +118,24 @@ def _export_line(share: dict) -> tuple:
     )
 
 
+def _in_after_order(pairs: list) -> list:
+    """
+    Modules in their given order, except that one whose manifest lists
+    modules under "after" comes once those that are present have run: a
+    module that uses another's work (the containers writing sites for the
+    proxy it installs) finds it done. A loop keeps the given order.
+    """
+    present = {manifest.get("id", module.name) for manifest, module in pairs}
+    pending, ordered, done = list(pairs), [], set()
+    while pending:
+        ready = next((i for i, (manifest, _) in enumerate(pending)
+                      if not (set(manifest.get("after") or []) & present) - done), 0)
+        manifest, module = pending.pop(ready)
+        ordered.append((manifest, module))
+        done.add(manifest.get("id", module.name))
+    return ordered
+
+
 class ReconciliationEngine:
     """
     Computes and applies what separates the running system from the
@@ -592,7 +610,7 @@ class ReconciliationEngine:
             logger.error("Modules not reconciled: %s", exc)
             return [ActionResult(action="modules", params={}, target_state="failed", error=str(exc))]
         results: List[ActionResult] = []
-        for manifest, module in pairs:
+        for manifest, module in _in_after_order(pairs):
             module_id = manifest.get("id", module.name)
             try:
                 results.extend(module.reconcile(sections.get(module_id) or {}, mode.value) or [])
