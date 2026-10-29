@@ -786,41 +786,90 @@ def _group_exists(engine, group: str) -> bool:
     return bool(stdout.strip())
 
 
+FIRST_ID, LAST_ID = 1000, 60000
+
+
+def _holder(engine, kind: str, number: int) -> Optional[str]:
+    """The account (kind "uid") or group (kind "gid") that holds `number` here."""
+    action, key = ("get_user_info", "username") if kind == "uid" else ("group_exists", "group")
+    try:
+        stdout, _ = engine.execute("users", action, check=False, **{key: str(number)})
+    except _ERRORS:
+        return None
+    fields = (stdout.strip().splitlines() or [""])[0].split(":")
+    return fields[0] if len(fields) > 2 and fields[2] == str(number) else None
+
+
+def make_room(engine, kind: str, number: int, wanted=frozenset()) -> Optional[str]:
+    """
+    Free `number` for the account or group that must have it: whoever holds
+    it here is moved to the first free number from FIRST_ID that nobody in
+    `wanted` waits for. Answers "" when it was free, what was moved, or None
+    when it cannot be freed (a number below FIRST_ID belongs to the system).
+    """
+    holder = _holder(engine, kind, number)
+    if not holder:
+        return ""
+    if number < FIRST_ID:
+        return None
+    free = next(n for n in range(FIRST_ID, LAST_ID)
+                if n != number and n not in wanted and not _holder(engine, kind, n))
+    if kind == "uid":
+        engine.execute("users", "uid_set", username=holder, uid=str(free))
+    else:
+        engine.execute("users", "group_gid_set", group=holder, gid=str(free))
+    moved = f"{holder} {kind} {number} -> {free}"
+    logger.info("Moved %s to make room", moved)
+    return moved
+
+
+def take_ids(engine, name: str, uid=None, gid=None, wanted_uids=frozenset(), wanted_gids=frozenset()) -> List[str]:
+    """
+    Give the account `name` the uid and its own group the gid the pool's
+    files carry, moving whoever holds them here first. The group an edition
+    gives on its own (wheel, gid 0, on FreeBSD) is no difference.
+    """
+    here = _ids(engine, name)
+    if not here:
+        return []
+    done = []
+    try:
+        if isinstance(uid, int) and uid != here[0]:
+            room = make_room(engine, "uid", uid, wanted_uids)
+            if room is None:
+                logger.warning("%s keeps uid %s: uid %s belongs to the system", name, here[0], uid)
+            else:
+                done += [room] if room else []
+                engine.execute("users", "uid_set", username=name, uid=str(uid))
+                done.append(f"{name} uid {here[0]} -> {uid}")
+        if isinstance(gid, int) and gid != here[1] and 0 not in (gid, here[1]):
+            if not _group_exists(engine, name):
+                logger.warning("%s keeps gid %s: no group of its own to renumber", name, here[1])
+            else:
+                room = make_room(engine, "gid", gid, wanted_gids)
+                if room is None:
+                    logger.warning("%s keeps gid %s: gid %s belongs to the system", name, here[1], gid)
+                else:
+                    done += [room] if room else []
+                    engine.execute("users", "gid_set", group=name, gid=str(gid), username=name)
+                    done.append(f"{name} gid {here[1]} -> {gid}")
+    except _ERRORS as exc:
+        logger.error("Could not give %s the numbers of the copy: %s", name, exc)
+    return done
+
+
 def _realign_ids(engine, users: List) -> List[str]:
     """
-    An account that exists here keeps everything but numbers that differ
-    from the copy's, which the files on the pool carry: it is given the
-    copy's uid, and its own group the copy's gid. The group an edition
-    gives on its own (wheel, gid 0, on FreeBSD) is no difference, and a
-    number another account or group holds here is left to it.
+    Accounts that exist here keep everything but numbers that differ from
+    the copy's, which the files on the pool carry: they take the copy's,
+    and whoever holds those here is moved to free ones.
     """
+    entries = [u for u in users if isinstance(u, dict) and u.get("username")]
+    wanted_uids = {u["uid"] for u in entries if isinstance(u.get("uid"), int)}
+    wanted_gids = {u["gid"] for u in entries if isinstance(u.get("gid"), int)}
     done = []
-    for user in users:
-        if not isinstance(user, dict) or not user.get("username"):
-            continue
-        name = user["username"]
-        here = _ids(engine, name)
-        if not here:
-            continue
-        uid, gid = here
-        want_uid, want_gid = user.get("uid"), user.get("gid")
-        try:
-            if isinstance(want_uid, int) and want_uid != uid:
-                if _ids(engine, str(want_uid)):
-                    logger.warning("%s keeps uid %s: uid %s is taken here", name, uid, want_uid)
-                else:
-                    engine.execute("users", "uid_set", username=name, uid=str(want_uid))
-                    done.append(f"{name} uid {uid} -> {want_uid}")
-            if isinstance(want_gid, int) and want_gid != gid and 0 not in (gid, want_gid):
-                if not _group_exists(engine, name):
-                    logger.warning("%s keeps gid %s: no group of its own to renumber", name, gid)
-                elif _group_exists(engine, str(want_gid)):
-                    logger.warning("%s keeps gid %s: gid %s is taken here", name, gid, want_gid)
-                else:
-                    engine.execute("users", "gid_set", group=name, gid=str(want_gid), username=name)
-                    done.append(f"{name} gid {gid} -> {want_gid}")
-        except _ERRORS as exc:
-            logger.error("Could not give %s the numbers of the copy: %s", name, exc)
+    for user in entries:
+        done += take_ids(engine, user["username"], user.get("uid"), user.get("gid"), wanted_uids, wanted_gids)
     for line in done:
         logger.info("Realigned %s", line)
     return done

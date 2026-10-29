@@ -67,7 +67,13 @@ class FakeEngine:
             return " ".join(self.users.get(kwargs["username"], [])), ""
         if key == ("users", "get_user_info"):
             name = kwargs["username"]
-            return (name if name in self.users or name in self.taken_uids else ""), ""
+            if name in self.taken_uids:
+                return f"other{name}:x:{name}:{name}::/home/other:/bin/sh\n", ""
+            return (name if name in self.users else ""), ""
+        if key == ("users", "uid_set"):
+            self.taken_uids = {u for u in self.taken_uids if u != kwargs["username"].removeprefix("other")}
+            self.taken_uids.add(kwargs["uid"])
+            return "", ""
         if key == ("directories", "owner_uid_get"):
             return self.owners.get(kwargs["path"], ""), ""
         if key == ("zfs", "acltype_list"):
@@ -634,12 +640,20 @@ def test_a_root_owned_share_says_nothing_about_its_owner():
     assert _created(engine) == [("create", "luca", "")]
 
 
-def test_a_uid_taken_here_is_not_reused():
+def test_the_account_holding_a_restored_users_uid_is_moved_to_a_free_one():
     engine = FakeEngine(taken_uids=[1003])
     results = reconciler(engine)._apply_changes(
         [Change("users.luca", None, {"username": "luca", "uid": 1003}, "add")])
-    assert _created(engine) == [("create", "luca", "")]
+    assert _created(engine) == [("create_with_uid", "luca", "1003")]
+    assert [(a, kw) for c, a, kw in engine.calls if a == "uid_set"] == [
+        ("uid_set", {"username": "other1003", "uid": "1000"})]
     assert results[0].target_state == "applied"
+
+
+def test_a_uid_the_system_holds_is_not_reused():
+    engine = FakeEngine(taken_uids=[998])
+    reconciler(engine)._apply_changes([Change("users.luca", None, {"username": "luca", "uid": 998}, "add")])
+    assert _created(engine) == [("create", "luca", "")]
 
 
 LINUX_GROUP = {("directories", "owner_group"): "{owner}", ("samba", "config_file"): "/dev/null",
@@ -1122,3 +1136,28 @@ def test_nothing_is_installed_when_every_module_is_there(monkeypatch):
     engine = ModulesEngine(["freedomnas-module-proxy"])
     assert reconciler(engine)._install_modules({"proxy": {"enabled": True}}) == []
     assert engine.calls == []
+
+
+def test_group_shares_are_given_back_again_once_numbers_moved(monkeypatch):
+    engine = FakeEngine()
+    rec = reconciler(engine)
+    monkeypatch.setattr(reconcile.shadow, "take_ids",
+                        lambda *a, **kw: ["media gid 1002 -> 1000", "sarah gid 1003 -> 1002"])
+    restored = []
+    monkeypatch.setattr(rec, "_do_share_group", lambda share: restored.append(share["name"]) or [])
+    share = {"name": "media", "group": "media", "path": "/tank/media"}
+    rec._apply_changes([Change("share_groups.media", None, share, "ensure"),
+                        Change("users.sarah", None, {"username": "sarah", "uid": 1002, "gid": 1002}, "add")])
+    assert restored == ["media", "media"]
+
+
+def test_group_shares_are_given_back_once_when_no_number_moved(monkeypatch):
+    engine = FakeEngine()
+    rec = reconciler(engine)
+    monkeypatch.setattr(reconcile.shadow, "take_ids", lambda *a, **kw: [])
+    restored = []
+    monkeypatch.setattr(rec, "_do_share_group", lambda share: restored.append(share["name"]) or [])
+    share = {"name": "media", "group": "media", "path": "/tank/media"}
+    rec._apply_changes([Change("share_groups.media", None, share, "ensure"),
+                        Change("users.sarah", None, {"username": "sarah", "uid": 1002, "gid": 1002}, "add")])
+    assert restored == ["media"]

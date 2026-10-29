@@ -87,12 +87,11 @@ class Zfs:
         if action == "pool_get_all":
             return f"bootfs\t{self.bootfs.get(kw['pool_name'], '-')}\tdefault\n", ""
         if action == "get_user_info":
-            entry = self.passwd.get(kw["username"])
-            if entry is None and kw["username"].isdigit():
-                name = next((n for n, e in self.passwd.items() if e[0] == int(kw["username"])), None)
-                entry = self.passwd.get(name) if name else None
-            return (f"{kw['username']}:x:{entry[0]}:{entry[1]}::/home/{kw['username']}:/bin/sh\n"
-                    if entry else ""), ""
+            name = kw["username"]
+            if name.isdigit():
+                name = next((n for n, e in self.passwd.items() if e[0] == int(name)), name)
+            entry = self.passwd.get(name)
+            return (f"{name}:x:{entry[0]}:{entry[1]}::/home/{name}:/bin/sh\n" if entry else ""), ""
         if action == "dataset_set":
             assert kw["property"] != "mountpoint" or kw["dataset"] != self.active, \
                 "moved the mountpoint of the dataset in use"
@@ -133,7 +132,16 @@ class Zfs:
         if action == "list_physical":
             return "".join(f"{name} {mac} e1000e\n" for name, mac in self.cards), ""
         if action == "group_exists":
-            return ("x\n" if kw["group"] in self.groups or kw["group"] in map(str, self.groups.values()) else ""), ""
+            group = kw["group"]
+            if group.isdigit():
+                group = next((n for n, g in self.groups.items() if g == int(group)), None)
+            return (f"{group}:x:{self.groups[group]}:\n" if group in self.groups else ""), ""
+        if action == "group_gid_set":
+            old = self.groups[kw["group"]]
+            self.groups[kw["group"]] = int(kw["gid"])
+            self.passwd = {n: (u, int(kw["gid"]) if g == old else g) for n, (u, g) in self.passwd.items()}
+            self.renumbered.append(("group", kw["group"], int(kw["gid"])))
+            return "", ""
         if action == "snapshot_create":
             snaps = self.snapshots.setdefault(kw["dataset"], {})
             snaps[kw["snap_name"]] = dict(self.datasets[kw["dataset"]]["files"])
@@ -411,15 +419,16 @@ def test_a_restored_user_who_exists_here_gets_the_copys_uid(tmp_path):
     assert result["realigned"] == ["sarah uid 1000 -> 1001"]
 
 
-def test_a_restored_user_whose_uid_is_taken_here_keeps_this_systems_ids(tmp_path):
+def test_the_account_holding_a_restored_users_uid_moves_to_a_free_one(tmp_path):
     zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
     (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
     zfs.passwd = {"sarah": (1000, 1000), "admin": (1001, 1001)}
 
-    shadow.boot(zfs)
+    result = shadow.boot(zfs)
 
     sarah = yaml.safe_load((zfs.state / "config.yaml").read_text())["users"][0]
-    assert (sarah["uid"], sarah["gid"]) == (1000, 1000)
+    assert sarah["uid"] == 1001 and zfs.passwd["admin"][0] == 1002
+    assert result["realigned"] == ["admin uid 1001 -> 1002", "sarah uid 1000 -> 1001"]
 
 
 BOX = {
@@ -739,16 +748,23 @@ def test_a_pool_from_another_machine_never_brings_its_identity(tmp_path):
     assert (tls / "ca.pem").read_text() == "MINE"
 
 
-def test_numbers_taken_here_and_the_editions_own_group_stay_as_they_are(tmp_path):
+def test_whoever_holds_the_copys_numbers_moves_to_free_ones(tmp_path):
     zfs = Zfs(tmp_path)
-    zfs.passwd = {"sarah": (1001, 0), "luca": (1005, 1005), "anna": (1007, 1007)}
-    zfs.groups = {"luca": 1005, "anna": 1007, "media": 1003}
+    zfs.passwd = {"sarah": (1001, 0), "luca": (1005, 1005), "anna": (1007, 1007), "daemon": (2, 2)}
+    zfs.groups = {"luca": 1005, "anna": 1007, "media": 1003, "daemon": 2}
     users = [{"username": "sarah", "uid": 1001, "gid": 1001},
              {"username": "luca", "uid": 1007, "gid": 1003},
+             {"username": "anna", "uid": 2, "gid": 1007},
              {"username": "nobody-here", "uid": 1009, "gid": 1009}]
 
-    assert shadow._realign_ids(zfs, users) == []
-    assert zfs.passwd == {"sarah": (1001, 0), "luca": (1005, 1005), "anna": (1007, 1007)}
+    done = shadow._realign_ids(zfs, users)
+
+    assert zfs.passwd["sarah"] == (1001, 0)
+    assert zfs.passwd["luca"] == (1007, 1003) and zfs.groups["luca"] == 1003
+    assert zfs.passwd["anna"] == (1000, 1007) and zfs.groups["media"] == 1000
+    assert zfs.passwd["daemon"] == (2, 2)
+    assert done == ["anna uid 1007 -> 1000", "luca uid 1005 -> 1007",
+                    "media gid 1003 -> 1000", "luca gid 1005 -> 1003"]
 
 
 def test_a_differing_identity_in_the_copy_is_never_overwritten(tmp_path):

@@ -496,6 +496,7 @@ class ReconciliationEngine:
         results: List[ActionResult] = []
         usershares_ready = False
         groups_checked: Set[str] = set()
+        self._renumbered = False
         for change in changes:
             path, kind = change.path, change.change_type
 
@@ -560,6 +561,10 @@ class ReconciliationEngine:
                 else:
                     results.append(self._do_nfs_share_create(change.new_value))
 
+        if self._renumbered:
+            for change in changes:
+                if change.path.startswith("share_groups."):
+                    results.extend(self._do_share_group(change.new_value))
         return results
 
     def _install_modules(self, sections: dict) -> List[ActionResult]:
@@ -882,6 +887,11 @@ class ReconciliationEngine:
                 return uid
         return None
 
+    def _wanted_ids(self) -> tuple:
+        users = [u for u in (self.config.get("users") or []) if isinstance(u, dict)]
+        return ({u["uid"] for u in users if isinstance(u.get("uid"), int)},
+                {u["gid"] for u in users if isinstance(u.get("gid"), int)})
+
     def _do_user_create(self, user: dict) -> ActionResult:
         username = user.get("username", "")
         groups = ",".join(user.get("groups", []))
@@ -892,10 +902,19 @@ class ReconciliationEngine:
                 target_state="skipped", error="user already exists",
             )
         uid = str(user.get("uid") or self._uid_from_data(username) or "")
+        wanted_uids, wanted_gids = self._wanted_ids()
         if uid and self._user_exists(uid):
-            logger.warning("uid %s of %s is taken here: created with a new one, "
-                           "its files keep the old owner", uid, username)
-            uid = ""
+            try:
+                room = shadow.make_room(self.engine, "uid", int(uid), wanted_uids)
+            except (CommandExecutionError, CommandTranslationError) as exc:
+                logger.error("Could not free uid %s for %s: %s", uid, username, exc)
+                room = None
+            if room is None:
+                logger.warning("uid %s of %s is taken here: created with a new one, "
+                               "its files keep the old owner", uid, username)
+                uid = ""
+            elif room:
+                self._renumbered = True
         if uid:
             params["uid"] = uid
         try:
@@ -908,6 +927,10 @@ class ReconciliationEngine:
                 shell=user.get("shell", "/bin/bash"),
             )
             logger.info("Created user: %s%s", username, f" (uid {uid})" if uid else "")
+            if isinstance(user.get("gid"), int):
+                for line in shadow.take_ids(self.engine, username, gid=user["gid"], wanted_gids=wanted_gids):
+                    logger.info("Realigned %s", line)
+                    self._renumbered = True
             return ActionResult(action="users.create", params=params, target_state="applied")
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Failed to create user %s: %s", username, exc)
