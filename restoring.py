@@ -100,6 +100,12 @@ class Progress:
         self.data["steps"] = [{"label": label, "state": "waiting", "error": ""} for label in labels]
         _write(self.path, self.data)
 
+    def add(self, label: str) -> int:
+        """A step learned of while running (a module the reconcile installed); returns its index."""
+        self.data["steps"].append({"label": label, "state": "waiting", "error": ""})
+        _write(self.path, self.data)
+        return len(self.data["steps"]) - 1
+
     def start(self, index: int) -> None:
         if index < len(self.data["steps"]):
             self.data["steps"][index]["state"] = "running"

@@ -1200,3 +1200,41 @@ def test_an_account_is_created_without_the_groups_this_system_lacks_yet(monkeypa
     assert result.target_state == "applied"
     [create] = [kw for c, a, kw in engine.calls if a in ("create", "create_with_uid")]
     assert create["groups"] == "wheel"
+
+
+def test_modules_installed_by_the_reconcile_bring_their_profiles_and_steps(monkeypatch):
+    present = [{"id": "users"}]
+
+    class Loader:
+        def __init__(self, engine, config):
+            pass
+
+        def discover(self):
+            return list(present)
+
+        def instances(self):
+            return [(m, RecordingModule(m["id"])) for m in present]
+
+    class Reloading(ModulesEngine):
+        reloads = 0
+
+        def reload_profile(self):
+            Reloading.reloads += 1
+
+        def execute(self, category, action, **kwargs):
+            if (category, action) == ("packages", "install"):
+                present.append({"id": "proxy"})
+            return super().execute(category, action, **kwargs)
+
+    monkeypatch.setattr(reconcile, "ModuleLoader", Loader)
+    engine = Reloading(["freedomnas-module-proxy"])
+    config = FakeConfig({"users": [ADMIN], "modules": {"proxy": {"enabled": True}}})
+    rec = reconciler(engine, config)
+    rec.progress = RecordingProgress()
+    added = []
+    rec.progress.add = lambda label: added.append(label) or 10
+    results = rec.reconcile()
+    assert Reloading.reloads == 1
+    assert added == ["Module proxy"]
+    assert ("done", 10, []) in rec.progress.calls
+    assert "proxy.done" in action_names(results)

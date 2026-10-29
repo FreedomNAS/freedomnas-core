@@ -429,6 +429,12 @@ class FreedomNASEngine:
             profile.update(fragment)
             logger.debug(f"Merged module profile fragment: {fragment_path}")
 
+    def reload_profile(self) -> None:
+        """Merge the profiles again: a module installed since the start brings its fragment."""
+        with self._lock:
+            self.profile, self.init_system = self._load_profile()
+        logger.info(f"Profiles of {self.os_type} loaded again (init: {self.init_system})")
+
     def _load_profile(self) -> Tuple[Dict[str, Any], str]:
         """
         Load and merge the OS profile with every module's profile fragment,

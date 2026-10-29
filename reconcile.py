@@ -209,6 +209,12 @@ class ReconciliationEngine:
         installing = len(changes)
         self._step_start(installing)
         installed = self._install_modules(desired.get("modules") or {})
+        if any(r.action == "modules.install" and r.target_state == "applied" for r in installed):
+            try:
+                self.engine.reload_profile()
+            except Exception as exc:
+                logger.error("Profiles not loaded again after installing modules: %s", exc)
+            self._plan_new_modules()
         self._step_done(installing, installed)
         results.extend(installed)
         results.extend(self._reconcile_modules(desired.get("modules") or {}, parse_mode(mode)))
@@ -226,6 +232,17 @@ class ReconciliationEngine:
         self._module_steps = {module_id: first + i for i, module_id in enumerate(modules)}
         self.progress.plan([restoring.step_label(c.path) for c in changes] + ["Modules to install"]
                            + [f"Module {module_id}" for module_id in modules])
+
+    def _plan_new_modules(self) -> None:
+        if not self.progress:
+            return
+        try:
+            manifests = [m for m in ModuleLoader(self.engine, self.config).discover() if m.get("id")]
+        except (ModuleLoaderException, OSError):
+            return
+        for module_id in [m["id"] for m, _ in _in_after_order([(m, None) for m in manifests])]:
+            if module_id not in self._module_steps:
+                self._module_steps[module_id] = self.progress.add(f"Module {module_id}")
 
     def _step_start(self, index: int) -> None:
         if self.progress:
