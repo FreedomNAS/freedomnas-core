@@ -242,6 +242,8 @@ def cmd_state_boot(_args) -> int:
     print(f"internal {result['internal']}")
     if result["source"]:
         print(f"source {result['source']}")
+    if result.get("reason"):
+        print(f"reason {result['reason']}")
     if result.get("network"):
         print(f"network {result['network']}")
     for pool in result["keep"]:

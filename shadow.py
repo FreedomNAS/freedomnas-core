@@ -37,6 +37,17 @@ may still be running with those addresses: an install that has a network
 of its own keeps it. When the network is taken, the reconciler applies it
 again at that boot, also to interfaces already configured.
 
+Every boot first snapshots each external copy (@boot-<date>, the newest
+ten kept), and a copy left incomplete is read back from its newest
+snapshot that holds an initialized configuration. An internal
+configuration that does not match the running system — another edition's,
+or an identity other than the one the copy of this machine keeps — is not
+trusted: the install is set up again from that copy as a reinstall would
+be, except for the accounts that exist here, which stay as they are; only
+an account whose uid or gid differs from the copy's is given the copy's
+numbers, which the files on the pool are owned by. The identity kept in a
+copy is never overwritten with a different one.
+
 The internal dataset carries org.freedomnas:role=internal. A pool that is
 another install's root — that property on its `.freedomnas`, or a bootfs —
 is left alone: never read, written, moved or kept imported.
@@ -44,6 +55,7 @@ is left alone: never read, written, moved or kept imported.
 
 import contextlib
 import copy
+import datetime
 import logging
 import shutil
 import tempfile
@@ -73,6 +85,8 @@ ROLE_PROPERTY = "org.freedomnas:role"
 NETWORK_MARKER = "network-reapply"
 
 IDENTITY_DIR = "identity"
+SNAPSHOT_PREFIX = "boot-"
+SNAPSHOTS_KEPT = 10
 
 _ERRORS = (CommandExecutionError, CommandTranslationError)
 
@@ -102,13 +116,27 @@ def _save_identity(engine, mountpoint: Path) -> None:
         for pattern in _IDENTITY_FILES[part]:
             for source in sorted(source_dir.glob(pattern)):
                 target = folder / part / source.name
-                if target.is_file() and target.read_bytes() == source.read_bytes():
+                if target.is_file():
+                    if target.read_bytes() != source.read_bytes():
+                        logger.warning("%s/%s kept as the copy has it: this system's differs", part, source.name)
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 folder.chmod(0o700)
                 target.parent.chmod(0o700)
                 shutil.copyfile(source, target)
                 target.chmod(0o600)
+
+
+def _identity_differences(engine, mountpoint: Path) -> List[str]:
+    folder = mountpoint / IDENTITY_DIR
+    differing = []
+    for part, live_dir in _identity_dirs(engine).items():
+        for pattern in _IDENTITY_FILES[part]:
+            for kept in sorted((folder / part).glob(pattern)):
+                live = live_dir / kept.name
+                if not live.is_file() or live.read_bytes() != kept.read_bytes():
+                    differing.append(f"{part}/{kept.name}")
+    return differing
 
 
 def _restore_identity(engine, mountpoint: Path) -> List[str]:
@@ -388,6 +416,60 @@ def _saved_at(config: Dict) -> str:
     return str((config.get("system") or {}).get("saved_at") or "")
 
 
+def _snapshots(engine, dataset: str) -> List[str]:
+    """The dataset's snapshots, newest first."""
+    try:
+        stdout, _ = engine.execute("zfs", "snapshot_list", check=False)
+    except _ERRORS:
+        return []
+    found = []
+    for line in stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) > 1 and fields[0].startswith(f"{dataset}@") and fields[1].isdigit():
+            found.append((int(fields[1]), fields[0].split("@", 1)[1]))
+    return [name for _, name in sorted(found, reverse=True)]
+
+
+def _snapshot(engine, dataset: str) -> None:
+    name = SNAPSHOT_PREFIX + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    try:
+        engine.execute("zfs", "snapshot_create", dataset=dataset, snap_name=name)
+    except _ERRORS as exc:
+        logger.warning("No snapshot of %s before this boot: %s", dataset, exc)
+        return
+    ours = [s for s in _snapshots(engine, dataset) if s.startswith(SNAPSHOT_PREFIX)]
+    for old in ours[SNAPSHOTS_KEPT:]:
+        try:
+            engine.execute("zfs", "snapshot_destroy", dataset=dataset, snap_name=old, check=False)
+        except _ERRORS as exc:
+            logger.warning("Could not destroy %s@%s: %s", dataset, old, exc)
+
+
+def _recover(engine, dataset: str) -> Optional[Dict]:
+    """
+    A copy without an initialized configuration gets back the configuration
+    and the identity of its newest snapshot that has one.
+    """
+    snapshots = _snapshots(engine, dataset)
+    if not snapshots:
+        return None
+    try:
+        with _mounted(engine, dataset) as mountpoint:
+            for name in snapshots:
+                kept = mountpoint / ".zfs" / "snapshot" / name
+                data = _load(kept / CONFIG_NAME)
+                if not _initialized(data):
+                    continue
+                shutil.copy2(kept / CONFIG_NAME, mountpoint / CONFIG_NAME)
+                if (kept / IDENTITY_DIR).is_dir():
+                    shutil.copytree(kept / IDENTITY_DIR, mountpoint / IDENTITY_DIR, dirs_exist_ok=True)
+                logger.warning("%s had no usable configuration: took the one of @%s", dataset, name)
+                return data
+    except (*_ERRORS, OSError) as exc:
+        logger.warning("Could not read the snapshots of %s: %s", dataset, exc)
+    return None
+
+
 def _empty(directory: Path) -> None:
     for entry in directory.iterdir():
         if entry.is_dir() and not entry.is_symlink():
@@ -555,6 +637,8 @@ def boot(engine) -> Dict:
       local    — the internal configuration, as it is
       merged   — the internal configuration, with the shared sections of the
                  newest external copy
+      reinitialized — the internal configuration does not match this system:
+                 set up again from the newest external one, accounts kept
       restored — no initialized internal configuration: the newest external
                  one was copied in (a reinstall)
       none     — nothing anywhere: the setup wizard runs
@@ -575,14 +659,27 @@ def boot(engine) -> Dict:
             continue
         copies.append(pool)
         _make_external(engine, dataset)
+        _snapshot(engine, dataset)
         data = _read(engine, dataset)
+        if not (data and _initialized(data)):
+            data = _recover(engine, dataset)
         if data and _initialized(data):
             externals.append((pool, data))
     externals.sort(key=lambda e: _saved_at(e[1]), reverse=True)
 
     imported = _pools(engine)
     result = {"internal": internal, "action": "none", "source": None, "keep": []}
-    if _initialized(local):
+    reason = _inconsistent(engine, local, *externals[0]) if _initialized(local) and externals else None
+    if reason:
+        pool, data = externals[0]
+        result.update(_reinitialize(engine, config_path, local, pool, data, reason))
+        network = _take_network(engine, config_path, externals)
+        if network:
+            result["network"] = network
+        current = _load(config_path)
+        if _local_ids(engine, current):
+            _write(config_path, current)
+    elif _initialized(local):
         result["action"] = "local"
         if externals:
             pool, data = externals[0]
@@ -623,6 +720,111 @@ def boot(engine) -> Dict:
     return result
 
 
+def _inconsistent(engine, local: Dict, pool: str, data: Dict) -> Optional[str]:
+    """
+    Why the internal configuration cannot be the truth about this system:
+    it was written for another edition, or the copy this machine keeps on
+    `pool` holds an identity this system does not have. None when it can.
+    """
+    edition = (local.get("system") or {}).get("edition")
+    if edition and edition != engine.os_type:
+        return f"it describes the {edition} edition, this system runs {engine.os_type}"
+    if not known_macs(data) & _present_macs(engine):
+        return None
+    try:
+        with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
+            differing = _identity_differences(engine, mountpoint)
+    except (*_ERRORS, OSError) as exc:
+        logger.warning("Could not compare the identity with %s: %s", pool, exc)
+        return None
+    if differing:
+        return f"its identity is not the one {pool} keeps ({', '.join(differing)})"
+    return None
+
+
+def _reinitialize(engine, config_path: Path, local: Dict, pool: str, data: Dict, reason: str) -> Dict:
+    """
+    Set this install up again from the copy on `pool`, as a reinstall:
+    everything the copy has, its identity included, for the running
+    edition, with the network this install has (the copy's comes when it
+    knows this machine). Accounts this install knows stay as they are; the
+    copy's own are added, never as administrators.
+    """
+    logger.warning("The configuration here cannot be trusted (%s): set up again from %s", reason, pool)
+    with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
+        identity = _restore_identity(engine, mountpoint)
+    fresh = copy.deepcopy(data)
+    fresh.setdefault("system", {})["edition"] = engine.os_type
+    fresh["network"] = copy.deepcopy(local.get("network") or {})
+    hostname = (local.get("system") or {}).get("hostname")
+    if hostname:
+        fresh["system"]["hostname"] = hostname
+    fresh["users"] = merge_shared({"users": local.get("users") or []}, data, _admin_extra(engine))["users"]
+    realigned = _realign_ids(engine, data.get("users") or [])
+    _write(config_path, fresh)
+    return {"action": "reinitialized", "source": pool, "reason": reason,
+            "identity": identity, "realigned": realigned}
+
+
+def _ids(engine, name: str) -> Optional[tuple]:
+    try:
+        stdout, _ = engine.execute("users", "get_user_info", username=name, check=False)
+    except _ERRORS:
+        return None
+    fields = stdout.strip().split(":")
+    if len(fields) < 4 or not fields[2].isdigit() or not fields[3].isdigit():
+        return None
+    return int(fields[2]), int(fields[3])
+
+
+def _group_exists(engine, group: str) -> bool:
+    try:
+        stdout, _ = engine.execute("users", "group_exists", group=group, check=False)
+    except _ERRORS:
+        return False
+    return bool(stdout.strip())
+
+
+def _realign_ids(engine, users: List) -> List[str]:
+    """
+    An account that exists here keeps everything but numbers that differ
+    from the copy's, which the files on the pool carry: it is given the
+    copy's uid, and its own group the copy's gid. The group an edition
+    gives on its own (wheel, gid 0, on FreeBSD) is no difference, and a
+    number another account or group holds here is left to it.
+    """
+    done = []
+    for user in users:
+        if not isinstance(user, dict) or not user.get("username"):
+            continue
+        name = user["username"]
+        here = _ids(engine, name)
+        if not here:
+            continue
+        uid, gid = here
+        want_uid, want_gid = user.get("uid"), user.get("gid")
+        try:
+            if isinstance(want_uid, int) and want_uid != uid:
+                if _ids(engine, str(want_uid)):
+                    logger.warning("%s keeps uid %s: uid %s is taken here", name, uid, want_uid)
+                else:
+                    engine.execute("users", "uid_set", username=name, uid=str(want_uid))
+                    done.append(f"{name} uid {uid} -> {want_uid}")
+            if isinstance(want_gid, int) and want_gid != gid and 0 not in (gid, want_gid):
+                if not _group_exists(engine, name):
+                    logger.warning("%s keeps gid %s: no group of its own to renumber", name, gid)
+                elif _group_exists(engine, str(want_gid)):
+                    logger.warning("%s keeps gid %s: gid %s is taken here", name, gid, want_gid)
+                else:
+                    engine.execute("users", "gid_set", group=name, gid=str(want_gid), username=name)
+                    done.append(f"{name} gid {gid} -> {want_gid}")
+        except _ERRORS as exc:
+            logger.error("Could not give %s the numbers of the copy: %s", name, exc)
+    for line in done:
+        logger.info("Realigned %s", line)
+    return done
+
+
 def _local_ids(engine, config: Dict) -> bool:
     """
     A user who exists here has, in the configuration, the IDs this system
@@ -634,14 +836,10 @@ def _local_ids(engine, config: Dict) -> bool:
     for user in config.get("users") or []:
         if not isinstance(user, dict) or not user.get("username"):
             continue
-        try:
-            stdout, _ = engine.execute("users", "get_user_info", username=user["username"], check=False)
-        except _ERRORS:
+        here = _ids(engine, user["username"])
+        if not here:
             continue
-        fields = stdout.strip().split(":")
-        if len(fields) < 4 or not fields[2].isdigit() or not fields[3].isdigit():
-            continue
-        uid, gid = int(fields[2]), int(fields[3])
+        uid, gid = here
         if user.get("uid") != uid or user.get("gid") != gid:
             logger.info("%s keeps uid %s and gid %s of this system", user["username"], uid, gid)
             user["uid"], user["gid"] = uid, gid

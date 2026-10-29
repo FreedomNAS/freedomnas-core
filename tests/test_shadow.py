@@ -38,6 +38,9 @@ class Zfs:
         self.cards = []
         self.profile = {"paths": {"config_dir": str(tmp_path)}}
         self.values = {}
+        self.snapshots = {}
+        self.groups = {}
+        self.renumbered = []
         if active:
             self._mount_state(active)
 
@@ -85,6 +88,9 @@ class Zfs:
             return f"bootfs\t{self.bootfs.get(kw['pool_name'], '-')}\tdefault\n", ""
         if action == "get_user_info":
             entry = self.passwd.get(kw["username"])
+            if entry is None and kw["username"].isdigit():
+                name = next((n for n, e in self.passwd.items() if e[0] == int(kw["username"])), None)
+                entry = self.passwd.get(name) if name else None
             return (f"{kw['username']}:x:{entry[0]}:{entry[1]}::/home/{kw['username']}:/bin/sh\n"
                     if entry else ""), ""
         if action == "dataset_set":
@@ -98,13 +104,19 @@ class Zfs:
             for name, data in self.datasets[kw["dataset"]]["files"].items():
                 (Path(kw["mountpoint"]) / name).parent.mkdir(parents=True, exist_ok=True)
                 (Path(kw["mountpoint"]) / name).write_bytes(data)
+            for snap, files in self.snapshots.get(kw["dataset"], {}).items():
+                for name, data in files.items():
+                    target = Path(kw["mountpoint"]) / ".zfs" / "snapshot" / snap / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
             self.mounted_at[kw["mountpoint"]] = kw["dataset"]
             return "", ""
         if action == "unmount_at":
             dataset = self.mounted_at.pop(kw["mountpoint"])
             directory = Path(kw["mountpoint"])
             self.datasets[dataset]["files"] = {str(f.relative_to(directory)): f.read_bytes()
-                                               for f in directory.rglob("*") if f.is_file()}
+                                               for f in directory.rglob("*") if f.is_file()
+                                               and f.relative_to(directory).parts[0] != ".zfs"}
             for f in directory.iterdir():
                 shutil.rmtree(f) if f.is_dir() else f.unlink()
             return "", ""
@@ -121,6 +133,25 @@ class Zfs:
         if action == "list_physical":
             return "".join(f"{name} {mac} e1000e\n" for name, mac in self.cards), ""
         if action == "group_exists":
+            return ("x\n" if kw["group"] in self.groups or kw["group"] in map(str, self.groups.values()) else ""), ""
+        if action == "snapshot_create":
+            snaps = self.snapshots.setdefault(kw["dataset"], {})
+            snaps[kw["snap_name"]] = dict(self.datasets[kw["dataset"]]["files"])
+            return "", ""
+        if action == "snapshot_list":
+            return "".join(f"{ds}@{name}\t{1000 + i}\t0\t0\t0\t\n"
+                           for ds, snaps in self.snapshots.items() for i, name in enumerate(snaps)), ""
+        if action == "snapshot_destroy":
+            del self.snapshots[kw["dataset"]][kw["snap_name"]]
+            return "", ""
+        if action == "uid_set":
+            self.passwd[kw["username"]] = (int(kw["uid"]), self.passwd[kw["username"]][1])
+            self.renumbered.append(("uid", kw["username"], int(kw["uid"])))
+            return "", ""
+        if action == "gid_set":
+            self.passwd[kw["username"]] = (self.passwd[kw["username"]][0], int(kw["gid"]))
+            self.groups[kw["group"]] = int(kw["gid"])
+            self.renumbered.append(("gid", kw["username"], int(kw["gid"])))
             return "", ""
         if action == "dataset_destroy":
             self.destroyed.append(kw["dataset"])
@@ -408,8 +439,12 @@ DEBIAN_VM = {
 }
 
 
+def here(config):
+    return {**config, "system": {**config["system"], "edition": "gentoo"}}
+
+
 def test_the_machines_network_comes_from_the_data_pool_even_when_older(tmp_path):
-    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(DEBIAN_VM)},
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(here(DEBIAN_VM))},
                                   "tank/.freedomnas": {"config.yaml": dump(BOX)}})
     zfs.cards = [("enp3s0", "1c:86:0b:32:98:ae"), ("enp0s25", "00:1e:4f:aa:bb:cc")]
 
@@ -452,7 +487,7 @@ def test_the_newest_copy_that_knows_this_machine_gives_the_network(tmp_path):
     elsewhere = {**BOX, "system": system("2026-10-15T12:00:00+00:00", hostname="elsewhere"),
                  "network": {"interfaces": [], "interfaces_mapping": {"aa:bb:cc:dd:ee:ff": "fnas_lan1"}}}
     zfs = Zfs(tmp_path, pools=("rpool", "tank", "backup"),
-              datasets={"rpool/.freedomnas": {"config.yaml": dump(DEBIAN_VM)},
+              datasets={"rpool/.freedomnas": {"config.yaml": dump(here(DEBIAN_VM))},
                         "tank/.freedomnas": {"config.yaml": dump(BOX)},
                         "backup/.freedomnas": {"config.yaml": dump(elsewhere)}})
     zfs.cards = [("enp3s0", "1c:86:0b:32:98:ae")]
@@ -566,3 +601,153 @@ def test_the_nas_identity_travels_with_the_copy_and_comes_back_on_a_reinstall(tm
     assert oct((ssh / "ssh_host_ed25519_key.pub").stat().st_mode & 0o777) == "0o644"
     assert "ssh/ssh_host_ed25519_key" in result["identity"]
     assert zfs.restarted == "sshd"
+
+
+def identity(tmp_path, zfs, ca="CA", key="KEY", host="HOST"):
+    tls, ssh = tmp_path / "tls", tmp_path / "ssh"
+    for d in (tls, ssh):
+        d.mkdir(exist_ok=True)
+    zfs.values = {("system", "ssh_host_key_dir"): str(ssh), ("system", "ssh_service"): "sshd"}
+    (tls / "ca.pem").write_text(ca)
+    (tls / "ca-key.pem").write_text(key)
+    (ssh / "ssh_host_ed25519_key").write_text(host)
+    return tls, ssh
+
+
+def kept_identity(ca="CA", key="KEY", host="HOST"):
+    return {"identity/tls/ca.pem": ca.encode(), "identity/tls/ca-key.pem": key.encode(),
+            "identity/ssh/ssh_host_ed25519_key": host.encode()}
+
+
+FREEBSD_BOX = {
+    "system": system("2026-10-29T04:38:00+00:00", hostname="skewbox", edition="freebsd"),
+    "users": [{"username": "sarah", "groups": [], "admin": True, "uid": 1002, "gid": 1002},
+              {"username": "luca", "groups": [], "admin": False, "uid": 1003, "gid": 1003}],
+    "shares": {"smb": [{"name": "media"}], "nfs": []},
+    "storage": {"pools": [{"name": "tank"}]},
+    "network": {"interfaces": [], "interfaces_mapping": {"52:54:00:12:34:56": "fnas_lan1"}},
+    "modules": {"containers": {"pool": "tank", "apps": {"jellyfin": {"recipe": "freebsd"}}}},
+}
+
+RESTORED_BY_OLD_CODE = {
+    "system": system("2026-10-29T04:40:00+00:00", hostname="skewbox", edition="gentoo"),
+    "users": [{"username": "admin", "groups": [], "admin": True, "uid": 1000, "gid": 1000},
+              {"username": "sarah", "groups": ["wheel"], "admin": True, "uid": 1001, "gid": 1001}],
+    "shares": {"smb": [], "nfs": []},
+    "storage": {"pools": [{"name": "tank"}]},
+    "network": {"interfaces": [], "interfaces_mapping": {"52:54:00:12:34:56": "fnas_lan1"}},
+}
+
+
+def test_every_boot_snapshots_the_copies_and_keeps_the_newest_ten(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+                                  "tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
+    zfs.snapshots["tank/.freedomnas"] = {f"boot-2026010{i}-000000": {} for i in range(10)}
+    zfs.snapshots["tank/.freedomnas"]["pre-artix"] = {}
+
+    shadow.boot(zfs)
+
+    names = list(zfs.snapshots["tank/.freedomnas"])
+    assert len([n for n in names if n.startswith("boot-")]) == 10
+    assert "boot-20260100-000000" not in names and "pre-artix" in names
+    assert "rpool/.freedomnas" not in zfs.snapshots
+
+
+def test_a_copy_left_incomplete_comes_back_from_its_newest_good_snapshot(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": b"system:\n  initialized: false\n"},
+                                  "tank/.freedomnas": {"config.yaml": b"system: {"}})
+    zfs.snapshots["tank/.freedomnas"] = {
+        "boot-20261028-000000": {"config.yaml": dump(GENTOO), **kept_identity()},
+        "boot-20261029-000000": {"config.yaml": b"system:\n  initialized: false\n"}}
+    tls, _ = identity(tmp_path, zfs, ca="NEW", key="NEW", host="NEW")
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("restored", "tank")
+    assert zfs.config("tank/.freedomnas")["system"]["hostname"] == "sarahs-box"
+    assert (tls / "ca-key.pem").read_text() == "KEY"
+
+
+def test_a_configuration_of_another_edition_is_set_up_again_from_the_copy(tmp_path):
+    local = {**RESTORED_BY_OLD_CODE, "system": {**RESTORED_BY_OLD_CODE["system"], "edition": "debian"}}
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(local)},
+                                  "tank/.freedomnas": {"config.yaml": dump(FREEBSD_BOX)}})
+    zfs.passwd = {"admin": (1000, 1000), "sarah": (1001, 1001)}
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("reinitialized", "tank")
+    assert "debian" in result["reason"]
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert config["system"]["edition"] == "gentoo"
+    assert config["modules"] == FREEBSD_BOX["modules"] and config["shares"] == FREEBSD_BOX["shares"]
+
+
+def test_an_identity_other_than_the_one_this_machine_keeps_sets_the_install_up_again(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(RESTORED_BY_OLD_CODE)},
+                                  "tank/.freedomnas": {"config.yaml": dump(FREEBSD_BOX), **kept_identity()}})
+    zfs.cards = [("enp1s0", "52:54:00:12:34:56")]
+    zfs.passwd = {"admin": (1000, 1000), "sarah": (1001, 1001)}
+    zfs.groups = {"admin": 1000, "sarah": 1001}
+    tls, ssh = identity(tmp_path, zfs, ca="IMAGE CA", key="IMAGE KEY", host="IMAGE HOST")
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("reinitialized", "tank")
+    assert (tls / "ca.pem").read_text() == "CA" and (tls / "ca-key.pem").read_text() == "KEY"
+    assert (ssh / "ssh_host_ed25519_key").read_text() == "HOST" and zfs.restarted == "sshd"
+    config = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    users = {u["username"]: u for u in config["users"]}
+    assert set(users) == {"admin", "sarah", "luca"}
+    assert users["sarah"]["admin"] and users["sarah"]["groups"] == ["wheel"]
+    assert users["luca"]["admin"] is False
+    assert zfs.renumbered == [("uid", "sarah", 1002), ("gid", "sarah", 1002)]
+    assert (users["sarah"]["uid"], users["sarah"]["gid"]) == (1002, 1002)
+    assert config["shares"] == FREEBSD_BOX["shares"] and config["modules"] == FREEBSD_BOX["modules"]
+    assert config["system"]["edition"] == "gentoo"
+
+
+def test_the_same_identity_keeps_the_configuration_of_this_install(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(RESTORED_BY_OLD_CODE)},
+                                  "tank/.freedomnas": {"config.yaml": dump(FREEBSD_BOX), **kept_identity()}})
+    zfs.cards = [("enp1s0", "52:54:00:12:34:56")]
+    identity(tmp_path, zfs)
+
+    assert shadow.boot(zfs)["action"] == "merged"
+    assert zfs.renumbered == []
+
+
+def test_a_pool_from_another_machine_never_brings_its_identity(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(RESTORED_BY_OLD_CODE)},
+                                  "tank/.freedomnas": {"config.yaml": dump(FREEBSD_BOX), **kept_identity()}})
+    zfs.cards = [("enp1s0", "52:54:00:aa:bb:cc")]
+    tls, _ = identity(tmp_path, zfs, ca="MINE")
+
+    assert shadow.boot(zfs)["action"] == "merged"
+    assert (tls / "ca.pem").read_text() == "MINE"
+
+
+def test_numbers_taken_here_and_the_editions_own_group_stay_as_they_are(tmp_path):
+    zfs = Zfs(tmp_path)
+    zfs.passwd = {"sarah": (1001, 0), "luca": (1005, 1005), "anna": (1007, 1007)}
+    zfs.groups = {"luca": 1005, "anna": 1007, "media": 1003}
+    users = [{"username": "sarah", "uid": 1001, "gid": 1001},
+             {"username": "luca", "uid": 1007, "gid": 1003},
+             {"username": "nobody-here", "uid": 1009, "gid": 1009}]
+
+    assert shadow._realign_ids(zfs, users) == []
+    assert zfs.passwd == {"sarah": (1001, 0), "luca": (1005, 1005), "anna": (1007, 1007)}
+
+
+def test_a_differing_identity_in_the_copy_is_never_overwritten(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"rpool/.freedomnas": {"config.yaml": dump(GENTOO)},
+                                  "tank/.freedomnas": kept_identity()},
+              active="rpool/.freedomnas")
+    identity(tmp_path, zfs, ca="IMAGE CA", key="IMAGE KEY", host="HOST")
+    (tmp_path / "ssh" / "ssh_host_rsa_key").write_text("NEW RSA")
+
+    shadow.sync(zfs, str(zfs.state / "config.yaml"))
+
+    kept = zfs.datasets["tank/.freedomnas"]["files"]
+    assert kept["identity/tls/ca.pem"] == b"CA" and kept["identity/tls/ca-key.pem"] == b"KEY"
+    assert kept["identity/ssh/ssh_host_rsa_key"] == b"NEW RSA"
