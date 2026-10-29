@@ -932,9 +932,26 @@ class ReconciliationEngine:
         return ({u["uid"] for u in users if isinstance(u.get("uid"), int)},
                 {u["gid"] for u in users if isinstance(u.get("gid"), int)})
 
+    def _group_present(self, group: str) -> bool:
+        try:
+            stdout, _ = self.engine.execute("users", "group_exists", group=group, check=False)
+        except (CommandExecutionError, CommandTranslationError):
+            return True
+        return bool(stdout.strip())
+
     def _do_user_create(self, user: dict) -> ActionResult:
+        """
+        A group the account belongs to that does not exist yet (docker, until
+        the containers module installs Docker later in the same reconcile)
+        is left out of the creation: the next reconcile adds the membership.
+        """
         username = user.get("username", "")
-        groups = ",".join(user.get("groups", []))
+        wanted = user.get("groups", [])
+        present = [g for g in wanted if self._group_present(g)]
+        if len(present) < len(wanted):
+            logger.info("%s created without %s: not on this system yet", username,
+                        ", ".join(g for g in wanted if g not in present))
+        groups = ",".join(present)
         params = {"username": username, "groups": groups}
         if self._user_exists(username):
             return ActionResult(

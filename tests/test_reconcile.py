@@ -1190,3 +1190,13 @@ def test_every_step_reaches_the_restore_lock(monkeypatch):
     assert plan == ("plan", ["Hostname", "Modules to install", "Module broken", "Module containers"])
     assert ("done", 0, []) in rec.progress.calls and ("done", 3, []) in rec.progress.calls
     assert ("done", 2, ["modules.broken: broken"]) in rec.progress.calls
+
+
+def test_an_account_is_created_without_the_groups_this_system_lacks_yet(monkeypatch):
+    engine = FakeEngine()
+    rec = reconciler(engine)
+    monkeypatch.setattr(rec, "_group_present", lambda group: group != "docker")
+    result = rec._do_user_create({"username": "sarah", "groups": ["docker", "wheel"], "uid": 1005})
+    assert result.target_state == "applied"
+    [create] = [kw for c, a, kw in engine.calls if a in ("create", "create_with_uid")]
+    assert create["groups"] == "wheel"
