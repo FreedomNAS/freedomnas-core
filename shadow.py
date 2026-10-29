@@ -700,6 +700,7 @@ def boot(engine) -> Dict:
             shutil.copy2(mountpoint / CONFIG_NAME, config_path)
             result["identity"] = _restore_identity(engine, mountpoint)
         restored = _load(config_path)
+        result["realigned"] = _realign_ids(engine, restored.get("users") or [])
         changed = _local_ids(engine, restored)
         if (restored.get("system") or {}).get("edition") != engine.os_type:
             restored.setdefault("system", {})["edition"] = engine.os_type

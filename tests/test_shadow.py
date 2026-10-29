@@ -399,10 +399,22 @@ def test_pools_with_a_copy_or_a_module_stay_imported(tmp_path):
     assert result["keep"] == ["mainpool", "strataos"]
 
 
-def test_a_restored_user_who_exists_here_keeps_this_systems_ids(tmp_path):
+def test_a_restored_user_who_exists_here_gets_the_copys_uid(tmp_path):
     zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
     (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
     zfs.passwd["sarah"] = (1000, 1000)
+
+    result = shadow.boot(zfs)
+
+    sarah = yaml.safe_load((zfs.state / "config.yaml").read_text())["users"][0]
+    assert (sarah["uid"], sarah["gid"]) == (1001, 1000)
+    assert result["realigned"] == ["sarah uid 1000 -> 1001"]
+
+
+def test_a_restored_user_whose_uid_is_taken_here_keeps_this_systems_ids(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+    zfs.passwd = {"sarah": (1000, 1000), "admin": (1001, 1001)}
 
     shadow.boot(zfs)
 
