@@ -251,6 +251,18 @@ def cmd_state_boot(_args) -> int:
     return 0
 
 
+def _configured_hostname() -> str:
+    try:
+        from freedomnas.config import ConfigurationManager
+    except ImportError:
+        from config import ConfigurationManager  # type: ignore
+    try:
+        config = ConfigurationManager()
+        return config.get_hostname() if config.is_initialized() else ""
+    except Exception:
+        return ""
+
+
 def cmd_ensure_tls(args) -> int:
     try:
         from freedomnas import tls
@@ -264,8 +276,9 @@ def cmd_ensure_tls(args) -> int:
     except Exception as exc:
         print(f"WARNING: could not read the network addresses: {exc}", file=sys.stderr)
         addresses = []
+    hostname = args.hostname or _configured_hostname()
     try:
-        issued = tls.ensure_certificate(args.hostname, addresses, not args.names_only)
+        issued = tls.ensure_certificate(hostname, addresses, not args.names_only)
     except Exception as exc:
         print(f"ERROR: could not create the TLS certificate: {exc}", file=sys.stderr)
         return 1
@@ -484,7 +497,7 @@ def main() -> int:
     )
     tls_parser.add_argument(
         "--hostname", default="",
-        help="Name to put in the certificate (default: the system hostname)",
+        help="Name to put in the certificate (default: the configured hostname, else the system's)",
     )
     tls_parser.add_argument(
         "--names-only", action="store_true",
