@@ -139,11 +139,12 @@ def _identity_differences(engine, mountpoint: Path) -> List[str]:
     return differing
 
 
-def _restore_identity(engine, mountpoint: Path) -> List[str]:
+def _restore_identity(engine, mountpoint: Path, restart_ssh: bool = True) -> List[str]:
     """
     Put the identity a copy carries back in place (a reinstall), the public
     halves readable as the originals were; the SSH service is restarted with
-    its keys. Returns what was restored.
+    its keys, unless the system is not running (an installer's chroot).
+    Returns what was restored.
     """
     folder = mountpoint / IDENTITY_DIR
     restored = []
@@ -155,7 +156,7 @@ def _restore_identity(engine, mountpoint: Path) -> List[str]:
                 shutil.copyfile(source, target)
                 target.chmod(0o644 if source.name.endswith((".pub", "ca.pem")) else 0o600)
                 restored.append(f"{part}/{source.name}")
-    if any(name.startswith("ssh/") for name in restored):
+    if restart_ssh and any(name.startswith("ssh/") for name in restored):
         try:
             engine.execute("services", "restart", check=False,
                            service_name=engine.get_profile_value("system", "ssh_service"))
@@ -164,6 +165,11 @@ def _restore_identity(engine, mountpoint: Path) -> List[str]:
     if restored:
         logger.info("Restored this NAS's identity: %s", ", ".join(restored))
     return restored
+
+
+def restore_identity(engine, source: Path, restart_ssh: bool = True) -> List[str]:
+    """The identity kept in `source`, laid out as a data pool's copy, back in place."""
+    return _restore_identity(engine, source, restart_ssh)
 
 
 def _pools(engine) -> List[str]:
@@ -640,7 +646,9 @@ def boot(engine) -> Dict:
       reinitialized — the internal configuration does not match this system:
                  set up again from the newest external one, accounts kept
       restored — no initialized internal configuration: the newest external
-                 one was copied in (a reinstall)
+                 one was copied in (a reinstall), or the one the installer
+                 was told to restore (system.restore_from); none when it was
+                 told not to (system.restore: false)
       none     — nothing anywhere: the setup wizard runs
     """
     if not internal_dataset(engine):
@@ -694,8 +702,8 @@ def boot(engine) -> Dict:
         current = _load(config_path)
         if _local_ids(engine, current):
             _write(config_path, current)
-    elif externals:
-        pool, _ = externals[0]
+    elif externals and (local.get("system") or {}).get("restore", True) is not False:
+        pool, _ = _chosen(local, externals)
         with _mounted(engine, f"{pool}/{DATASET_NAME}") as mountpoint:
             shutil.copy2(mountpoint / CONFIG_NAME, config_path)
             result["identity"] = _restore_identity(engine, mountpoint)
@@ -719,6 +727,12 @@ def boot(engine) -> Dict:
     result["keep"] = [p for p in imported if p != root and p in named
                       and not foreign_root(engine, p, root)]
     return result
+
+
+def _chosen(local: Dict, externals: List) -> tuple:
+    """The copy the installer was told to restore when it is here, else the newest."""
+    wanted = (local.get("system") or {}).get("restore_from")
+    return next((e for e in externals if e[0] == wanted), externals[0])
 
 
 def _inconsistent(engine, local: Dict, pool: str, data: Dict) -> Optional[str]:

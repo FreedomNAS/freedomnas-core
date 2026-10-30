@@ -18,6 +18,7 @@ import json
 import signal
 import sys
 import threading
+from pathlib import Path
 
 
 def cmd_version(_args) -> int:
@@ -249,6 +250,31 @@ def cmd_state_boot(_args) -> int:
     for pool in result["keep"]:
         print(f"keep {pool}")
     return 0
+
+
+def cmd_restore_offline(args) -> int:
+    try:
+        from freedomnas.engine import get_engine
+        from freedomnas import offline_restore
+    except ImportError:
+        from engine import get_engine  # type: ignore
+        import offline_restore  # type: ignore
+
+    try:
+        result = offline_restore.restore(get_engine(), Path(args.source))
+    except Exception as exc:
+        print(f"ERROR: could not restore from {args.source}: {exc}", file=sys.stderr)
+        return 1
+    for name in result["identity"]:
+        print(f"identity {name}")
+    failed = 0
+    for r in result["results"]:
+        if r.target_state == "failed":
+            failed += 1
+            print(f"FAIL  {r.action} {r.params}: {r.error}", file=sys.stderr)
+        else:
+            print(f"{r.target_state.upper():<8}{r.action} {r.params}" + (f": {r.error}" if r.error else ""))
+    return 1 if failed else 0
 
 
 def _configured_hostname() -> str:
@@ -534,6 +560,13 @@ def main() -> int:
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
     path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending",
                                               "restoring"])
+    offline_parser = sub.add_parser(
+        "restore-offline",
+        help="Before the first boot (an installer's chroot): put back the identity and install the modules "
+             "of the configuration copied into SOURCE",
+    )
+    offline_parser.add_argument("--from", dest="source", required=True,
+                                help="Directory holding config.yaml and identity/, as a data pool's .freedomnas")
     begin_parser = sub.add_parser(
         "restore-begin",
         help="Put the restore lock in place: the WebUI serves only the restore page until it is gone",
@@ -555,6 +588,7 @@ def main() -> int:
         "grow-root-pool": cmd_grow_root_pool,
         "reconcile":    cmd_reconcile,
         "restore-begin": cmd_restore_begin,
+        "restore-offline": cmd_restore_offline,
         "ensure-tls":   cmd_ensure_tls,
         "snapshot-run": cmd_snapshot_run,
         "shadow-sync":  cmd_shadow_sync,

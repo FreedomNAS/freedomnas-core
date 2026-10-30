@@ -252,6 +252,30 @@ def test_a_reinstall_restores_the_data_pools_copy(tmp_path):
     assert (zfs.state / "setup-pending").read_text() == "image\n"
 
 
+def test_the_copy_the_installer_was_told_to_restore_wins_over_a_newer_one(tmp_path):
+    older = {**GENTOO, "system": system("2026-10-01T10:00:00+00:00", hostname="old-box")}
+    newer = {**GENTOO, "system": system("2026-10-20T10:00:00+00:00", hostname="new-box")}
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(older)},
+                                  "backup/.freedomnas": {"config.yaml": dump(newer)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n  restore_from: tank\n")
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("restored", "tank")
+    restored = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert restored["system"]["hostname"] == "old-box" and "restore_from" not in restored["system"]
+
+
+def test_a_new_nas_chosen_in_the_installer_restores_nothing(tmp_path):
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(GENTOO)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n  restore: false\n")
+
+    result = shadow.boot(zfs)
+
+    assert (result["action"], result["source"]) == ("none", None)
+    assert yaml.safe_load((zfs.state / "config.yaml").read_text())["system"]["initialized"] is False
+
+
 def test_a_restore_from_another_edition_records_the_running_one(tmp_path):
     debian = {**GENTOO, "system": system("2026-10-14T20:00:00+00:00", edition="debian")}
     zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(debian)}})

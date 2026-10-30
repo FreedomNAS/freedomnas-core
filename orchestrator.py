@@ -124,6 +124,16 @@ class FreedomNASModule(ABC):
         """
         return []
 
+    def prepare(self, desired: dict) -> list:
+        """
+        Install what `desired` needs on a system that is not running yet: an
+        installer restoring a configuration into the system it installs, in
+        its chroot. Packages only — no service is started and no pool is
+        touched; the first boot's reconcile does the rest. Returns
+        ActionResults.
+        """
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator

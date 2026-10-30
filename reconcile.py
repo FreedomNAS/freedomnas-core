@@ -137,6 +137,48 @@ def _in_after_order(pairs: list) -> list:
     return ordered
 
 
+def install_missing_modules(engine, config, sections: dict) -> List[ActionResult]:
+    """
+    A module the configuration has a section for but this system lacks
+    (a fresh install restored from its pool, another edition) has its
+    package installed from the edition's repositories, as the Plugins
+    page would, so that it is loaded and reconciled right after. The
+    installer calls it too, through offline_restore, before the first boot.
+    """
+    wanted = {module_id for module_id, section in sections.items() if isinstance(section, dict) and section}
+    try:
+        present = {m.get("id") for m in ModuleLoader(engine, config).discover()}
+    except (ModuleLoaderException, OSError) as exc:
+        logger.error("Modules not checked: %s", exc)
+        return []
+    missing = sorted(wanted - present)
+    if not missing:
+        return []
+    try:
+        engine.execute("packages", "update_cache", timeout=3600, check=False)
+        offered = module_packages(engine)
+    except (CommandExecutionError, CommandTranslationError) as exc:
+        return [ActionResult(action="modules.install", params={"modules": missing}, target_state="failed",
+                             error=str(exc))]
+    results: List[ActionResult] = []
+    for module_id in missing:
+        params = {"module": module_id}
+        package = offered.get(module_id)
+        if not package:
+            results.append(ActionResult(action="modules.install", params=params, target_state="skipped",
+                                        error=f"the repositories of this edition have no module {module_id}"))
+            continue
+        params["package"] = package
+        try:
+            engine.execute("packages", "install", package_name=package, timeout=7200)
+            logger.info("Module %s installed (%s)", module_id, package)
+            results.append(ActionResult(action="modules.install", params=params, target_state="applied"))
+        except (CommandExecutionError, CommandTranslationError) as exc:
+            logger.error("Could not install module %s: %s", module_id, exc)
+            results.append(ActionResult(action="modules.install", params=params, target_state="failed",
+                                        error=str(exc)))
+    return results
+
 class ReconciliationEngine:
     """
     Computes and applies what separates the running system from the
@@ -619,45 +661,7 @@ class ReconciliationEngine:
         return results
 
     def _install_modules(self, sections: dict) -> List[ActionResult]:
-        """
-        A module the configuration has a section for but this system lacks
-        (a fresh install restored from its pool, another edition) has its
-        package installed from the edition's repositories, as the Plugins
-        page would, so that it is loaded and reconciled right after.
-        """
-        wanted = {module_id for module_id, section in sections.items() if isinstance(section, dict) and section}
-        try:
-            present = {m.get("id") for m in ModuleLoader(self.engine, self.config).discover()}
-        except (ModuleLoaderException, OSError) as exc:
-            logger.error("Modules not checked: %s", exc)
-            return []
-        missing = sorted(wanted - present)
-        if not missing:
-            return []
-        try:
-            self.engine.execute("packages", "update_cache", timeout=3600, check=False)
-            offered = module_packages(self.engine)
-        except (CommandExecutionError, CommandTranslationError) as exc:
-            return [ActionResult(action="modules.install", params={"modules": missing}, target_state="failed",
-                                 error=str(exc))]
-        results: List[ActionResult] = []
-        for module_id in missing:
-            params = {"module": module_id}
-            package = offered.get(module_id)
-            if not package:
-                results.append(ActionResult(action="modules.install", params=params, target_state="skipped",
-                                            error=f"the repositories of this edition have no module {module_id}"))
-                continue
-            params["package"] = package
-            try:
-                self.engine.execute("packages", "install", package_name=package, timeout=7200)
-                logger.info("Module %s installed (%s)", module_id, package)
-                results.append(ActionResult(action="modules.install", params=params, target_state="applied"))
-            except (CommandExecutionError, CommandTranslationError) as exc:
-                logger.error("Could not install module %s: %s", module_id, exc)
-                results.append(ActionResult(action="modules.install", params=params, target_state="failed",
-                                            error=str(exc)))
-        return results
+        return install_missing_modules(self.engine, self.config, sections)
 
     def _reconcile_modules(self, sections: dict, mode: ReconcileMode) -> List[ActionResult]:
         try:
