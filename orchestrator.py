@@ -134,6 +134,17 @@ class FreedomNASModule(ABC):
         """
         return []
 
+    def links(self) -> list:
+        """
+        The web pages this module serves that every account of the NAS may
+        open, for the WebUI's account page: dicts with "name", and "title",
+        "path", "url" (an address of its own) or "scheme" and "port" (on the
+        address the WebUI was reached at). The WebUI joins the entries of all
+        modules that have the same name, so one module may give the title and
+        another the address. Called after start().
+        """
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator
