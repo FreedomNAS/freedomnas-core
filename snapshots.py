@@ -62,17 +62,22 @@ class SnapshotScheduler:
                 keep = 0
             if not dataset or keep <= 0:
                 continue
-            results.append(self._run_one(dataset, interval, keep, now))
+            results.append(self._run_one(dataset, interval, keep, now, policy.get("recursive") is True))
         return results
 
     # ------------------------------------------------------------------
 
-    def _run_one(self, dataset: str, interval: str, keep: int, now) -> Dict:
+    def _run_one(self, dataset: str, interval: str, keep: int, now, recursive: bool = False) -> Dict:
+        """
+        A recursive policy snapshots the dataset and every dataset inside it
+        at the same moment, under the same name, and prunes them together.
+        """
         name = snapshot_name(interval, now)
+        suffix = "_recursive" if recursive else ""
         result = {"dataset": dataset, "interval": interval, "created": None,
                   "destroyed": [], "error": None}
         try:
-            self.engine.execute("zfs", "snapshot_create", dataset=dataset, snap_name=name)
+            self.engine.execute("zfs", "snapshot_create" + suffix, dataset=dataset, snap_name=name)
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.error("Snapshot of %s failed: %s", dataset, exc)
             result["error"] = str(exc)
@@ -80,7 +85,7 @@ class SnapshotScheduler:
 
         result["created"] = f"{dataset}@{name}"
         logger.info("Created %s", result["created"])
-        result["destroyed"] = self._prune(dataset, interval, keep)
+        result["destroyed"] = self._prune(dataset, interval, keep, suffix)
         return result
 
     def _ours(self, dataset: str, interval: str) -> List[str]:
@@ -99,13 +104,13 @@ class SnapshotScheduler:
         ]
         return sorted(names)
 
-    def _prune(self, dataset: str, interval: str, keep: int) -> List[str]:
+    def _prune(self, dataset: str, interval: str, keep: int, suffix: str = "") -> List[str]:
         existing = self._ours(dataset, interval)
         destroyed = []
         for full_name in existing[:max(0, len(existing) - keep)]:
             snap = full_name.split("@", 1)[1]
             try:
-                self.engine.execute("zfs", "snapshot_destroy", dataset=dataset, snap_name=snap)
+                self.engine.execute("zfs", "snapshot_destroy" + suffix, dataset=dataset, snap_name=snap)
             except (CommandExecutionError, CommandTranslationError) as exc:
                 logger.error("Could not destroy %s: %s", full_name, exc)
                 continue

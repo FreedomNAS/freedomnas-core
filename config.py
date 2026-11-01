@@ -109,7 +109,7 @@ class ConfigurationManager:
         "snapshots": {
             "root": [],  # Root filesystem snapshots
             "boot": [],  # Boot snapshots (FreeBSD)
-            "policies": [],  # {dataset, hourly, daily, weekly, monthly}
+            "policies": [],  # {dataset, hourly, daily, weekly, monthly, recursive}
         },
         "updates": {
             "topgrade": {
@@ -662,16 +662,36 @@ class ConfigurationManager:
         """Every dataset with a retention policy, and how many to keep."""
         return self.config.get("snapshots", {}).get("policies", [])
 
-    def set_snapshot_policy(self, dataset: str, keep: Dict[str, int]) -> None:
+    def set_snapshot_policy(self, dataset: str, keep: Dict[str, int], recursive: bool = False) -> None:
         """
         Set how many snapshots of each interval to keep for one dataset.
 
         An interval left out, or set to zero, means "do not take these" — the
         scheduler only ever prunes what it created itself, so turning one off
         never touches snapshots taken by hand.
+
+        A recursive policy takes and prunes the snapshots of every dataset
+        inside this one together, so no dataset may be under two policies:
+        one inside a recursive policy's dataset, or a recursive one over a
+        dataset that has a policy of its own, is refused.
         """
         if not dataset:
             raise ConfigurationException("Snapshot policy must name a dataset")
+        if not isinstance(recursive, bool):
+            raise ConfigurationException("recursive must be true or false")
+
+        for other in self.get_snapshot_policies():
+            name = other.get("dataset") or ""
+            if name == dataset:
+                continue
+            if other.get("recursive") and dataset.startswith(name + "/"):
+                raise ConfigurationException(
+                    f"{dataset} is already in the schedule of {name}, which includes the datasets inside it"
+                )
+            if recursive and name.startswith(dataset + "/"):
+                raise ConfigurationException(
+                    f"{name} has a schedule of its own: remove it first, or leave out the datasets inside"
+                )
 
         cleaned = {}
         for interval in self.SNAPSHOT_INTERVALS:
@@ -683,7 +703,7 @@ class ConfigurationManager:
             cleaned[interval] = count
 
         policies = [p for p in self.get_snapshot_policies() if p.get("dataset") != dataset]
-        policies.append({"dataset": dataset, **cleaned})
+        policies.append({"dataset": dataset, **cleaned, "recursive": recursive})
         self.config.setdefault("snapshots", {})["policies"] = policies
         self.save()
 
