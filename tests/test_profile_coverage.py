@@ -51,6 +51,10 @@ OPTIONAL = {("updates", "topgrade_extra_config")}
 UKI_ONLY = {("bootloader", action) for action in
             ("uki_backup", "boot_ok", "autorollback_set", "boot_state", "rollback_forget")}
 
+# The tarball bootstrap (system_installer.py), run only for an edition whose
+# installer_meta.bootstrap_methods offers it: FreeBSD installs pkgbase instead.
+TARBALL_ONLY = {("bootstrap", "fetch_tarball"), ("bootstrap", "unpack_tarball")}
+
 
 def _merged_profile(edition: str) -> dict:
     """Assemble a profile the way engine._load_profile() does."""
@@ -131,6 +135,8 @@ def test_every_engine_call_exists_in_the_profile(edition):
         if (category, action) in BSD_ONLY and edition != "freebsd":
             continue
         if (category, action) in UKI_ONLY and edition == "freebsd":
+            continue
+        if (category, action) in TARBALL_ONLY and "tarball" not in profile.get("installer_meta", {}).get("bootstrap_methods", []):
             continue
         if (category, action) in OPTIONAL or (category, action) in _guarded_pairs():
             continue
