@@ -15,7 +15,7 @@ Recommends: zfsutils-freedomnas | zfsutils-linux | zfs-fuse
 Description: FreedomNAS Core Engine — OS-agnostic storage appliance
  The FreedomNAS Core Engine provides:
   • Universal OS abstraction via JSON Translator Layer
-  • Support for Debian, FreeBSD, and Arch Linux
+  • Support for Debian, Arch, Artix, Void, Gentoo and FreeBSD
   • ZFS pool and dataset management
   • Network and user configuration
   • System provisioning and disaster recovery

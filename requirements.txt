@@ -2,6 +2,6 @@
 # FreedomNAS Core requires Python 3.7+
 # Standard library + YAML for configuration + cryptography for keyslot wrapping
 
-PyYAML==6.0
+PyYAML>=6.0
 cryptography>=41.0
 pytest>=7.0

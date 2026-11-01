@@ -430,7 +430,6 @@ def _survey(engine, pool: str, final_name: str, root_mountpoint: Optional[str],
     if any(r["unlocked"] for r in roots):
         datasets = _tree(engine, pool)
     projected = project_mountpoints(datasets, final_name, root_mountpoint)
-    root = datasets[0] if datasets else {}
     return {
         "datasets": [{
             "dataset": ds["rel"],
