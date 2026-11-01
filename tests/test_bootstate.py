@@ -45,6 +45,9 @@ class FakeEngine:
             raise CommandExecutionError(f"{action} failed")
         return (self.state if action == "boot_state" else ""), ""
 
+    def get_command(self, category, action, **kwargs):
+        raise CommandTranslationError(f"Command not found: {category}.{action}")
+
 
 def test_the_boot_is_confirmed_with_the_configured_setting():
     engine = FakeEngine()

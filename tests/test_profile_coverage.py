@@ -36,6 +36,11 @@ EDITIONS = ["debian", "freebsd", "arch", "artix", "void", "gentoo"]
 # Only consulted on FreeBSD (api/routes/network.py branches on os_family;
 # bootstate.py asks for the installed kernel only without a UKI).
 BSD_ONLY = {("network", "list_interfaces_json"), ("bootloader", "kernel_installed")}
+# Boot environments (bootenv.py, asked only after bootenv.supported() found be_list).
+BSD_ONLY |= {("bootloader", action) for action in
+             ("be_list", "be_create", "be_activate", "be_destroy", "be_activate_once", "be_mountpoint",
+              "be_mount", "be_umount", "be_fix_loader", "be_fingerprint", "be_enter", "be_leave")}
+BSD_ONLY |= {("updates", "be_update")}
 
 # Looked up inside a try/except: an edition declares one only when it needs
 # to correct the tool being configured, and its absence is the normal case.

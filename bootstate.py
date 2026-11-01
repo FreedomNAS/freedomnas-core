@@ -5,7 +5,9 @@ The work happens in the initramfs (dracut module 92freedomnas-fallback) and
 in the zz-dracut-uki hook, which keep their state in boot.state on the ESP.
 From here the system confirms that it booted, turns the rollback on or off,
 reports what happened, and clears the record once the administrator has
-seen it. Editions without a UKI (FreeBSD) have none of these commands.
+seen it. Editions without a UKI (FreeBSD) have none of these commands: there
+an update goes into a new boot environment on trial instead (bootenv.py),
+and this module reports its outcome the same way.
 
 It also tells whether the system must reboot: the kernel it would boot
 (the active UKI's, or FreeBSD's /boot/kernel) is not the one running.
@@ -20,6 +22,11 @@ try:
     from freedomnas.engine import CommandExecutionError, CommandTranslationError
 except ImportError:  # running from the repository, not from the package
     from engine import CommandExecutionError, CommandTranslationError  # type: ignore
+
+try:
+    from freedomnas import bootenv
+except ImportError:  # running from the repository, not from the package
+    import bootenv  # type: ignore[no-redef]
 
 logger = logging.getLogger("FreedomNAS.BootState")
 
@@ -78,14 +85,19 @@ def summary(engine, config) -> Dict[str, object]:
     state = read_state(engine)
     running = os.uname().release
     installed = installed_kernel(engine, state)
+    in_copies = bootenv.updates_inside(engine)
+    trial = bootenv.pending_trial(engine) if in_copies else None
     result = {
-        "supported": state is not None,
+        "supported": state is not None or in_copies,
         "autorollback": autorollback_enabled(config),
         "state": (state or {}).get("state", "ok"),
         "rollback": None,
         "kernel": {"running": running, "installed": installed},
-        "reboot_needed": bool(installed) and installed != running,
+        "reboot_needed": (bool(installed) and installed != running) or bool(trial),
     }
+    if trial:
+        result["state"] = "trial"
+        result["trial_system"] = trial
     if state and state.get("date") and state.get("failed-kernel"):
         dataset = state.get("failed-dataset", "")
         result["rollback"] = {
@@ -97,12 +109,23 @@ def summary(engine, config) -> Dict[str, object]:
             "system_restored": state.get("fs-rollback") == "yes",
             "failed_dataset": dataset if _FAILED_DATASET.match(dataset) else "",
         }
+    notice = bootenv.rollback_notice(engine) if in_copies else None
+    if notice and not result["rollback"]:
+        result["rollback"] = {
+            "date": notice.get("date", ""),
+            "failed_system": notice.get("failed", ""),
+            "restored_system": notice.get("restored", ""),
+        }
     return result
 
 
 def set_autorollback(engine, config, enabled: bool) -> None:
     """Dual write: boot.state for the initramfs, config.yaml for a restore."""
-    engine.execute("bootloader", "autorollback_set", autorollback=_flag(enabled))
+    try:
+        engine.execute("bootloader", "autorollback_set", autorollback=_flag(enabled))
+    except CommandTranslationError:
+        if not bootenv.updates_inside(engine):
+            raise
     config.set(CONFIG_KEY, enabled)
 
 
@@ -111,9 +134,12 @@ def forget(engine, destroy_failed: bool) -> Optional[str]:
     Clear the record of a rollback, and with destroy_failed also the failed
     root dataset it kept. Returns the dataset destroyed, if any.
     """
+    state = read_state(engine)
+    if state is None and bootenv.updates_inside(engine):
+        return bootenv.forget(engine, destroy_failed)
     destroyed = None
     if destroy_failed:
-        dataset = (read_state(engine) or {}).get("failed-dataset", "")
+        dataset = (state or {}).get("failed-dataset", "")
         if dataset and _FAILED_DATASET.match(dataset):
             engine.execute("zfs", "dataset_destroy_recursive", dataset=dataset)
             destroyed = dataset

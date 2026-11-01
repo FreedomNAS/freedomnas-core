@@ -420,6 +420,14 @@ def cmd_boot_ok(_args) -> int:
         print(f"ERROR: could not initialise engine: {exc}", file=sys.stderr)
         return 1
     confirm_boot(engine, config)
+    try:
+        from freedomnas import bootenv
+    except ImportError:
+        import bootenv  # type: ignore
+    try:
+        bootenv.confirm_boot(engine)
+    except Exception as exc:
+        print(f"WARNING: could not confirm the boot environment: {exc}", file=sys.stderr)
     return 0
 
 
