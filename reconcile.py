@@ -1032,8 +1032,9 @@ class ReconciliationEngine:
             except (CommandExecutionError, CommandTranslationError) as exc:
                 if not self._group_present(group):
                     reason = (f"{username} not added to {group}: this {self.engine.os_type} system has no such "
-                              "group. This is normal for an account restored from another edition, or until "
-                              "the software that creates the group is installed")
+                              "group. If this account was restored from another operating system (Linux to "
+                              "FreeBSD, or FreeBSD to Linux), you can ignore this warning. Otherwise the group "
+                              "appears once the software that creates it is installed")
                     logger.warning(reason)
                     results.append(ActionResult(action="users.add_to_group", params=params, target_state="warning",
                                                 error=reason))
