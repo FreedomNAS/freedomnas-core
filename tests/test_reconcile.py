@@ -453,6 +453,19 @@ def test_user_modify_adds_and_removes_groups():
         ("users.add_to_group", "sambashare"), ("users.remove_from_group", "docker")]
 
 
+@pytest.mark.parametrize("answer, state", [("", "warning"), ("wheel:*:0:root", "failed")])
+def test_only_a_group_this_system_does_not_have_is_a_warning(answer, state):
+    engine = FakeEngine(failing={("users", "add_to_group")})
+    execute = engine.execute
+    engine.os_type = "freebsd"
+    engine.execute = lambda category, action, **kw: (
+        (answer, "") if action == "group_exists" else execute(category, action, **kw))
+    [result] = reconciler(engine)._do_user_modify(
+        {"username": "alice", "groups": ["wheel"]}, {"username": "alice", "groups": []})
+    assert (result.action, result.target_state) == ("users.add_to_group", state)
+    assert ("this freebsd system has no such group" in result.error) == (state == "warning")
+
+
 @pytest.mark.parametrize("share, acl", [
     ({"name": "foto", "path": "/tank/foto", "acl": "Everyone:R,sarah:F,mario:R"},
      "Everyone:R,sarah:F,mario:R"),

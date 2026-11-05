@@ -388,7 +388,7 @@ def cmd_reconcile(args) -> int:
 
     failed = 0
     for result in results:
-        marker = {"applied": "OK", "skipped": "SKIP", "failed": "FAIL"}.get(result.target_state, "??")
+        marker = {"applied": "OK", "skipped": "SKIP", "failed": "FAIL", "warning": "WARN"}.get(result.target_state, "??")
         line = f"  {marker}  {result.action} {result.params}"
         if result.error:
             line += f" -- {result.error}"
@@ -396,7 +396,8 @@ def cmd_reconcile(args) -> int:
         if result.target_state == "failed":
             failed += 1
 
-    print(f"\n{len(results)} action(s), {failed} failure(s).")
+    warnings = sum(r.target_state == "warning" for r in results)
+    print(f"\n{len(results)} action(s), {failed} failure(s)" + (f", {warnings} warning(s)." if warnings else "."))
     if reconciler.progress:
         reconciler.progress.finish([f"{r.action}: {r.error}" for r in results if r.target_state == "failed"])
     return 1 if failed else 0

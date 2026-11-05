@@ -81,7 +81,7 @@ class Change:
 class ActionResult:
     action: str
     params: dict
-    target_state: str  # "applied" | "failed" | "skipped"
+    target_state: str  # "applied" | "failed" | "warning" | "skipped"
     error: Optional[str] = None
 
 
@@ -1030,8 +1030,16 @@ class ReconciliationEngine:
                 logger.info("Added %s to group %s", username, group)
                 results.append(ActionResult(action="users.add_to_group", params=params, target_state="applied"))
             except (CommandExecutionError, CommandTranslationError) as exc:
-                logger.error("Failed to add %s to group %s: %s", username, group, exc)
-                results.append(ActionResult(action="users.add_to_group", params=params, target_state="failed", error=str(exc)))
+                if not self._group_present(group):
+                    reason = (f"{username} not added to {group}: this {self.engine.os_type} system has no such "
+                              "group. This is normal for an account restored from another edition, or until "
+                              "the software that creates the group is installed")
+                    logger.warning(reason)
+                    results.append(ActionResult(action="users.add_to_group", params=params, target_state="warning",
+                                                error=reason))
+                else:
+                    logger.error("Failed to add %s to group %s: %s", username, group, exc)
+                    results.append(ActionResult(action="users.add_to_group", params=params, target_state="failed", error=str(exc)))
 
         for group in sorted(current_groups - desired_groups):
             params = {"username": username, "group": group}
