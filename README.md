@@ -9,20 +9,21 @@ Instead of scattering OS-specific code throughout the codebase, FreedomNAS Core 
 ```
 [WebUI/Installer] 
         ↓
-engine.execute("services", "restart", service_name="samba")
+engine.execute("services", "restart", service_name="sshd")
         ↓
 [FreedomNAS Engine - JSON Translator]
         ↓
-Debian: systemctl restart samba
-FreeBSD: service samba restart
-Arch: systemctl restart samba
+Debian (systemd): systemctl restart sshd
+Artix (OpenRC):   rc-service sshd restart
+FreeBSD (rc):     <install_root>/profiles/assets/freedomnas-rc-service restart sshd
 ```
 
 ## Components
 
 - **engine.py**: The main engine
 - **config.py**: Persistent configuration management
-- **os_profiles/**: Directory containing the JSON profiles for each OS
+- The JSON profiles for each OS and init system live in the separate
+  **freedomnas-profiles** repository (`os/`, `init/`, one fragment per module)
 
 ## Quick Usage
 
@@ -163,21 +164,17 @@ engine = FreedomNASEngine(os_override="freebsd")
 
 ## OS Profiles
 
-Each distribution has its own JSON profile with the command mapping:
+Each distribution has its own JSON profile with the command mapping
+(`os/os-<os>.json` in freedomnas-profiles, merged with one
+`<module>/<module>-<os>.json` fragment per module and with the init system's
+`init/init-<init>.json`, which supplies `services`):
 
 ```json
 {
   "os_name": "Debian",
   "os_family": "linux",
-  "os_version": "12+",
-  
-  "services": {
-    "start": "systemctl start {service_name}",
-    "stop": "systemctl stop {service_name}",
-    "restart": "systemctl restart {service_name}",
-    ...
-  },
-  
+  "init_system": "systemd",
+
   "packages": {
     "install": "apt install -y {package_name}",
     ...
