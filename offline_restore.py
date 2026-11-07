@@ -72,10 +72,14 @@ def restore(engine, source: Path) -> Dict[str, List]:
 
 def _prepare_modules(engine, config, sections: Dict[str, dict]) -> List[ActionResult]:
     try:
-        pairs = ModuleLoader(engine, config).instances()
+        loader = ModuleLoader(engine, config)
+        pairs = loader.instances()
     except ModuleLoaderException as exc:
         return [ActionResult(action="modules.prepare", params={}, target_state="failed", error=str(exc))]
-    results: List[ActionResult] = []
+    results: List[ActionResult] = [
+        ActionResult(action=f"modules.{module_id}.prepare", params={}, target_state="failed",
+                     error=f"Module not loaded: {reason}")
+        for module_id, reason in sorted(loader.failed.items()) if sections.get(module_id)]
     for manifest, module in pairs:
         module_id = manifest.get("id", module.name)
         section = sections.get(module_id)

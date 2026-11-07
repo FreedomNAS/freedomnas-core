@@ -63,6 +63,8 @@ class Module:
 
 def loader(present, modules):
     class Loader:
+        failed = {}
+
         def __init__(self, engine, config):
             pass
 

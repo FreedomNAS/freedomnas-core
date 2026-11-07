@@ -147,7 +147,8 @@ def install_missing_modules(engine, config, sections: dict) -> List[ActionResult
     """
     wanted = {module_id for module_id, section in sections.items() if isinstance(section, dict) and section}
     try:
-        present = {m.get("id") for m in ModuleLoader(engine, config).discover()}
+        loader = ModuleLoader(engine, config)
+        present = {m.get("id") for m in loader.discover()} | set(loader.failed)
     except (ModuleLoaderException, OSError) as exc:
         logger.error("Modules not checked: %s", exc)
         return []
@@ -670,11 +671,16 @@ class ReconciliationEngine:
 
     def _reconcile_modules(self, sections: dict, mode: ReconcileMode) -> List[ActionResult]:
         try:
-            pairs = ModuleLoader(self.engine, self.config).instances()
+            loader = ModuleLoader(self.engine, self.config)
+            pairs = loader.instances()
         except ModuleLoaderException as exc:
             logger.error("Modules not reconciled: %s", exc)
             return [ActionResult(action="modules", params={}, target_state="failed", error=str(exc))]
-        results: List[ActionResult] = []
+        reported = getattr(self.engine, "profile_failures", None) or {}
+        results: List[ActionResult] = [
+            ActionResult(action=f"modules.{module_id}", params={}, target_state="failed",
+                         error=f"Module not loaded: {reason}")
+            for module_id, reason in sorted(loader.failed.items()) if module_id not in reported]
         for manifest, module in _in_after_order(pairs):
             module_id = manifest.get("id", module.name)
             step = self._module_steps.get(module_id)

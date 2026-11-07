@@ -19,6 +19,11 @@ manifest.json fields used here:
                           Loads {module_dir}/{file_stem}.py and looks up ClassName.
     supported_os  list — module is skipped (not an error) if the current OS
                           isn't in this list.
+
+Each module is loaded on its own: a malformed manifest, an entry point that
+cannot be imported, a constructor that raises, or a profile fragment the
+engine left out (engine.profile_failures) leaves that module out and
+records it in `failed` (module id -> reason); the others still load.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import importlib.util
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 try:
     from freedomnas.engine import FreedomNASEngine
@@ -54,6 +59,7 @@ class ModuleLoader:
         self._engine = engine
         self._config = config
         self.modules_dirs = [Path(modules_dir)] if modules_dir else self._get_default_modules_dirs()
+        self.failed: Dict[str, str] = {}
 
     @staticmethod
     def _get_default_modules_dirs() -> List[Path]:
@@ -81,7 +87,12 @@ class ModuleLoader:
                     with open(manifest_path, "r") as f:
                         manifest = json.load(f)
                 except json.JSONDecodeError as exc:
-                    raise ModuleLoaderException(f"Invalid JSON in {manifest_path}: {exc}")
+                    self._fail(entry.name, f"Invalid JSON in {manifest_path}, line {exc.lineno} "
+                                           f"column {exc.colno}: {exc.msg}")
+                    continue
+                if not isinstance(manifest, dict):
+                    self._fail(entry.name, f"{manifest_path} is not a JSON object")
+                    continue
                 module_id = manifest.get("id", entry.name)
                 if module_id in seen:
                     logger.warning("Module '%s' in %s ignored: the id is already taken", module_id, base)
@@ -110,7 +121,12 @@ class ModuleLoader:
         if spec is None or spec.loader is None:
             raise ModuleLoaderException(f"Could not create import spec for {file_path}")
         py_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(py_module)
+        try:
+            spec.loader.exec_module(py_module)
+        except SyntaxError as exc:
+            raise ModuleLoaderException(f"SyntaxError in {exc.filename}, line {exc.lineno}: {exc.msg}")
+        except Exception as exc:
+            raise ModuleLoaderException(f"{file_path} could not be imported: {type(exc).__name__}: {exc}")
 
         try:
             return getattr(py_module, class_name)
@@ -133,15 +149,31 @@ class ModuleLoader:
                 )
                 continue
 
-            entry_point = manifest.get("entry_point")
-            if not entry_point:
-                logger.warning("Module '%s' has no entry_point — skipping", module_id)
+            profile_failure = (getattr(self._engine, "profile_failures", None) or {}).get(module_id)
+            if profile_failure:
+                self._fail(module_id, profile_failure)
                 continue
 
-            module_class = self._load_class(manifest["_dir"], entry_point)
-            instance: FreedomNASModule = module_class(self._engine, self._config)
+            entry_point = manifest.get("entry_point")
+            if not entry_point:
+                self._fail(module_id, f"{manifest['_dir'] / 'manifest.json'} names no entry_point")
+                continue
+
+            try:
+                module_class = self._load_class(manifest["_dir"], entry_point)
+                instance: FreedomNASModule = module_class(self._engine, self._config)
+            except ModuleLoaderException as exc:
+                self._fail(module_id, str(exc))
+                continue
+            except Exception as exc:
+                self._fail(module_id, f"{module_id} could not be created: {type(exc).__name__}: {exc}")
+                continue
             loaded.append((manifest, instance))
         return loaded
+
+    def _fail(self, module_id: str, reason: str) -> None:
+        logger.error("Module '%s' not loaded: %s", module_id, reason)
+        self.failed[module_id] = reason
 
     def load_all(self, orchestrator: Orchestrator) -> List[str]:
         """

@@ -983,6 +983,8 @@ class RecordingModule:
 
 def with_modules(monkeypatch, *modules, error=None):
     class Loader:
+        failed = {}
+
         def __init__(self, engine, config):
             if error:
                 raise ModuleLoaderException(error)
@@ -1122,6 +1124,8 @@ class ModulesEngine(FakeEngine):
 
 def test_a_module_the_configuration_names_but_the_system_lacks_is_installed(monkeypatch):
     class Loader:
+        failed = {}
+
         def __init__(self, engine, config):
             pass
 
@@ -1139,6 +1143,8 @@ def test_a_module_the_configuration_names_but_the_system_lacks_is_installed(monk
 
 def test_nothing_is_installed_when_every_module_is_there(monkeypatch):
     class Loader:
+        failed = {}
+
         def __init__(self, engine, config):
             pass
 
@@ -1219,6 +1225,9 @@ def test_modules_installed_by_the_reconcile_bring_their_profiles_and_steps(monke
     present = [{"id": "users"}]
 
     class Loader:
+
+        failed = {}
+
         def __init__(self, engine, config):
             pass
 
@@ -1261,3 +1270,40 @@ def test_a_community_profile_left_out_by_the_engine_is_reported(monkeypatch):
     assert [(r.action, r.target_state) for r in results] == [
         ("modules.broken.profile", "failed"), ("fine.done", "applied")]
     assert "line 2 column 3" in results[0].error
+
+
+def test_broken_modules_are_reported_and_the_working_one_is_reconciled(tmp_path):
+    import json
+    base = tmp_path / "modules"
+    for name, manifest, source in [
+        ("badmanifest", '{"id": "badmanifest",', ""),
+        ("badimport", json.dumps({"id": "badimport", "entry_point": "module:M"}), "raise RuntimeError('boom')\n"),
+        ("good", json.dumps({"id": "good", "entry_point": "module:M"}),
+         "from orchestrator import FreedomNASModule\n"
+         "from reconcile import ActionResult\n"
+         "class M(FreedomNASModule):\n"
+         "    name = 'good'\n"
+         "    def start(self): pass\n"
+         "    def stop(self): pass\n"
+         "    def health_check(self): return True\n"
+         "    def reconcile(self, desired, mode):\n"
+         "        return [ActionResult(action='good.done', params=desired, target_state='applied')]\n"),
+    ]:
+        (base / name).mkdir(parents=True)
+        (base / name / "manifest.json").write_text(manifest)
+        (base / name / "module.py").write_text(source)
+
+    class Loader(reconcile.ModuleLoader):
+        def __init__(self, engine, config):
+            super().__init__(engine, config, modules_dir=str(base))
+
+    engine = FakeEngine(users={"sarah": ["sudo"]})
+    engine.os_type = "debian"
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(reconcile, "ModuleLoader", Loader)
+        results = reconciler(engine, FakeConfig({"users": [ADMIN], "modules": {"good": {"x": 1}}})).reconcile()
+    states = {r.action: (r.target_state, r.error) for r in results}
+    assert states["good.done"][0] == "applied"
+    assert states["modules.badmanifest"][0] == "failed" and "line 1 column" in states["modules.badmanifest"][1]
+    assert states["modules.badimport"][0] == "failed" and "RuntimeError: boom" in states["modules.badimport"][1]

@@ -460,6 +460,8 @@ def cmd_serve(_args) -> int:
         print(f"ERROR: module discovery failed: {exc}", file=sys.stderr)
         return 1
 
+    for module_id, reason in sorted(loader.failed.items()):
+        print(f"ERROR: module {module_id} not loaded: {reason}", file=sys.stderr)
     if not registered:
         print("WARNING: no modules registered", file=sys.stderr)
     else:
