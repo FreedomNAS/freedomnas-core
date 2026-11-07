@@ -717,7 +717,7 @@ class TestOutputListener:
 # Invalid profile fragments
 # ---------------------------------------------------------------------------
 
-class TestInvalidFragments:
+class FragmentTree:
     @pytest.fixture
     def tree(self, tmp_path, monkeypatch):
         import engine as engine_module
@@ -739,6 +739,8 @@ class TestInvalidFragments:
     def load(self, profiles):
         return FreedomNASEngine(profile_dir=str(profiles), os_override="debian")
 
+
+class TestInvalidFragments(FragmentTree):
     def test_a_broken_community_fragment_is_left_out_and_reported(self, tree):
         (tree / "broken").mkdir()
         (tree / "broken" / "broken-debian.json").write_text('{\n  "broken": {"list": "x",}\n}')
@@ -786,3 +788,50 @@ class TestInvalidFragments:
         engine.reload_profile()
         assert engine.profile_failures == {}
         assert engine.profile["broken"] == {"list": "x"}
+
+
+class TestFragmentOwnership(FragmentTree):
+    def community(self, tmp_path, tree, name, fragment):
+        (tmp_path / "modules" / name).mkdir(exist_ok=True)
+        (tmp_path / "modules" / name / "manifest.json").write_text(json.dumps({"id": name}))
+        (tree / name).mkdir()
+        (tree / name / f"{name}-debian.json").write_text(json.dumps(fragment))
+
+    def test_a_module_cannot_replace_a_core_category(self, tree, tmp_path):
+        self.community(tmp_path, tree, "aaa", {"users": {"list": "evil"}, "aaa": {"x": "y"}})
+        engine = self.load(tree)
+        assert engine.profile["users"] == {"list": "getent passwd"}
+        assert "aaa" not in engine.profile
+        assert "the category 'users' belongs to the core" in engine.profile_failures["aaa"]
+
+    def test_a_module_cannot_replace_a_category_of_the_os_profile(self, tree, tmp_path):
+        self.community(tmp_path, tree, "zzz", {"os_name": "Evil"})
+        engine = self.load(tree)
+        assert engine.profile["os_name"] == "Debian"
+        assert "'os_name' belongs to the core" in engine.profile_failures["zzz"]
+
+    def test_the_second_module_naming_a_category_is_refused(self, tree, tmp_path):
+        self.community(tmp_path, tree, "zzz", {"proxy": {"reload": "evil"}})
+        engine = self.load(tree)
+        assert engine.profile["proxy"] == {"reload": "true"}
+        assert "'proxy' belongs to the module proxy" in engine.profile_failures["zzz"]
+        assert "proxy" not in engine.profile_failures
+
+    def test_modules_are_merged_in_name_order(self, tree, tmp_path):
+        self.community(tmp_path, tree, "aaa", {"proxy": {"reload": "first"}})
+        engine = self.load(tree)
+        assert engine.profile["proxy"] == {"reload": "first"}
+        assert "'proxy' belongs to the module aaa" in engine.profile_failures["proxy"]
+
+    def test_a_module_adding_new_categories_is_merged(self, tree, tmp_path):
+        self.community(tmp_path, tree, "zzz", {"zzz": {"a": "b"}, "zzz_extra": {"c": "d"}})
+        engine = self.load(tree)
+        assert engine.profile["zzz"] == {"a": "b"} and engine.profile["zzz_extra"] == {"c": "d"}
+        assert engine.profile_failures == {}
+
+    def test_a_refused_module_takes_no_category(self, tree, tmp_path):
+        self.community(tmp_path, tree, "aaa", {"users": {}, "shared": {"from": "aaa"}})
+        self.community(tmp_path, tree, "bbb", {"shared": {"from": "bbb"}})
+        engine = self.load(tree)
+        assert engine.profile["shared"] == {"from": "bbb"}
+        assert list(engine.profile_failures) == ["aaa"]

@@ -407,24 +407,29 @@ class FreedomNASEngine:
         Scan every module's profile subdirectory (e.g. profiles/storage/) and
         merge in {dirname}/{dirname}-{os_type}.json when present.
 
-        Each module fragment contributes its own top-level category key(s),
-        so there's no overlap to resolve — this is a plain dict.update() per
-        fragment. Reserved directories (_RESERVED_PROFILE_DIRS) are skipped;
+        The core fragments are merged first, then the community modules'
+        fragments in name order. A community fragment may only add top-level
+        categories nobody has defined yet: one that names a category of the
+        OS profile, of a core fragment or of an earlier module is refused as
+        a whole. Reserved directories (_RESERVED_PROFILE_DIRS) are skipped;
         a directory with no fragment for the current OS is silently skipped
         too (e.g. a community module that doesn't support this OS).
 
-        An invalid fragment of a community module is left out and recorded
-        in self.profile_failures (module id -> reason); an invalid core
-        fragment stops the engine, naming the file and the position.
+        A refused or invalid fragment of a community module is left out and
+        recorded in self.profile_failures (module id -> reason); an invalid
+        core fragment stops the engine, naming the file and the position.
         """
         self.profile_failures: Dict[str, str] = {}
         community = self._community_module_ids()
-        for entry in sorted(self.profile_dir.iterdir()):
-            if not entry.is_dir() or entry.name in self._RESERVED_PROFILE_DIRS:
-                continue
+        owners = {key: "the core" for key in profile}
+        entries = [e for e in sorted(self.profile_dir.iterdir())
+                   if e.is_dir() and e.name not in self._RESERVED_PROFILE_DIRS
+                   and (e / f"{e.name}-{self.os_type}.json").exists()]
+        core = [e for e in entries if e.name not in community]
+        modules = [e for e in entries if e.name in community]
+        for entry in core + modules:
             fragment_path = entry / f"{entry.name}-{self.os_type}.json"
-            if not fragment_path.exists():
-                continue
+            is_module = entry.name in community
             try:
                 with open(fragment_path, "r") as f:
                     fragment = json.load(f)
@@ -436,12 +441,22 @@ class FreedomNASEngine:
                               f"line {exc.lineno} column {exc.colno}: {exc.msg}")
                 else:
                     reason = f"Invalid profile fragment {fragment_path}: {exc}"
-                if entry.name not in community:
+                if not is_module:
                     raise FreedomNASEngineException(reason)
                 self.profile_failures[entry.name] = reason
                 logger.error(reason)
                 continue
+            if is_module:
+                taken = sorted(key for key in fragment if key in owners)
+                if taken:
+                    reason = (f"Profile fragment {fragment_path} refused: "
+                              + ", ".join(f"the category '{key}' belongs to {owners[key]}" for key in taken))
+                    self.profile_failures[entry.name] = reason
+                    logger.error(reason)
+                    continue
             profile.update(fragment)
+            owner = f"the module {entry.name}" if is_module else "the core"
+            owners.update({key: owner for key in fragment})
             logger.debug(f"Merged module profile fragment: {fragment_path}")
 
     @staticmethod
