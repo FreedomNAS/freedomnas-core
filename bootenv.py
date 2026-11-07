@@ -19,7 +19,9 @@ root, so the line is taken out before a copy is activated, and at every boot
 from the running one.
 
 Only the copies made here are ever destroyed by themselves: the newest KEEP
-stay. Those made by freebsd-update or by hand are left to the administrator.
+stay, by the stamp in their name. Where updates go into a copy, the
+pre-update-<stamp> copies of the old way of updating are obsolete and go
+first. Those made by freebsd-update or by hand are left to the administrator.
 Editions without boot environments have none of these commands.
 """
 
@@ -114,11 +116,24 @@ def create_before_update(engine, stamp: str) -> Optional[str]:
     return name
 
 
+def _stamp(name: str) -> str:
+    return name[len(PREFIX):] if name.startswith(PREFIX) else name[len(UPDATE_PREFIX):]
+
+
 def prune(engine, keep: int = KEEP) -> List[str]:
+    """
+    Destroy the copies of ours nothing needs any more: where updates go into a
+    copy, every pre-update-<stamp> left by the old way of updating first, then
+    all but the newest `keep` by their stamp. The running system, the one that
+    starts next and a failed trial kept for the notice are never touched.
+    """
     failed = (load_state(engine).get("rollback") or {}).get("failed")
     ours = [e for e in list_all(engine) if e["ours"]]
-    spare = sorted(e["name"] for e in ours if not e["running"] and not e["next_boot"] and e["name"] != failed)
-    newest = set(sorted(e["name"] for e in ours)[-keep:])
+    obsolete = PREFIX if updates_inside(engine) else None
+    spare = sorted((e["name"] for e in ours if not e["running"] and not e["next_boot"] and e["name"] != failed),
+                   key=lambda name: (not (obsolete and name.startswith(obsolete)), _stamp(name)))
+    current = sorted((e["name"] for e in ours if not (obsolete and e["name"].startswith(obsolete))), key=_stamp)
+    newest = set(current[-keep:]) if keep > 0 else set()
     destroyed = []
     for name in spare:
         if name in newest:
@@ -128,7 +143,10 @@ def prune(engine, keep: int = KEEP) -> List[str]:
         except (CommandExecutionError, CommandTranslationError) as exc:
             logger.warning("Could not destroy the boot environment %s: %s", name, exc)
             continue
-        logger.info("Boot environment %s destroyed (more than %d kept)", name, keep)
+        if obsolete and name.startswith(obsolete):
+            logger.info("Boot environment %s destroyed (left by the old way of updating)", name)
+        else:
+            logger.info("Boot environment %s destroyed (more than %d kept)", name, keep)
         destroyed.append(name)
     return destroyed
 

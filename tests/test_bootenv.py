@@ -193,3 +193,23 @@ def test_a_new_update_drops_one_never_started():
 def test_where_updates_go_into_copies_no_pre_update_copy_is_made():
     engine = FakeEngine([row("freebsd", "NR")], inside=True)
     assert bootenv.create_before_update(engine, "20261101-100000") is None
+
+
+def test_old_pre_update_copies_go_first_where_updates_go_into_a_copy():
+    old = [row("pre-update-20261020-100000"), row("pre-update-20261030-100000")]
+    new = [row(f"update-2026110{i}-100000") for i in range(1, 7)]
+    engine = FakeEngine([row("freebsd", "NR")] + old + new, inside=True)
+    destroyed = bootenv.prune(engine, keep=5)
+    assert destroyed == ["pre-update-20261020-100000", "pre-update-20261030-100000", "update-20261101-100000"]
+    assert [r[0] for r in engine.rows if r[0].startswith("update-")] == [f"update-2026110{i}-100000" for i in range(2, 7)]
+
+
+def test_a_running_pre_update_copy_is_kept_where_updates_go_into_a_copy():
+    engine = FakeEngine([row("pre-update-20261030-100000", "NR"), row("update-20261101-100000")], inside=True)
+    assert bootenv.prune(engine, keep=5) == []
+
+
+def test_copies_are_ordered_by_their_stamp_not_their_name():
+    rows = [row("update-20261101-100000"), row("pre-update-20261105-100000")]
+    engine = FakeEngine([row("freebsd", "NR")] + rows)
+    assert bootenv.prune(engine, keep=1) == ["update-20261101-100000"]
