@@ -259,8 +259,13 @@ class ReconciliationEngine:
             self._plan_new_modules()
         self._step_done(installing, installed)
         results.extend(installed)
+        results.extend(self._profile_failures())
         results.extend(self._reconcile_modules(desired.get("modules") or {}, parse_mode(mode)))
         return results
+
+    def _profile_failures(self) -> List[ActionResult]:
+        return [ActionResult(action=f"modules.{module_id}.profile", params={}, target_state="failed", error=reason)
+                for module_id, reason in sorted(getattr(self.engine, "profile_failures", {}).items())]
 
     def _plan_progress(self, changes: List[Change]) -> None:
         if not self.progress:

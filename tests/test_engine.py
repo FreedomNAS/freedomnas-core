@@ -711,3 +711,78 @@ class TestOutputListener:
         engine = FreedomNASEngine.for_target("debian", profile_dir=PROFILES_DIR)
         assert engine.output_listener is None
         assert engine._run_safe("echo plain", 10, True, False) == ("plain", "")
+
+
+# ---------------------------------------------------------------------------
+# Invalid profile fragments
+# ---------------------------------------------------------------------------
+
+class TestInvalidFragments:
+    @pytest.fixture
+    def tree(self, tmp_path, monkeypatch):
+        import engine as engine_module
+        profiles = tmp_path / "profiles"
+        (profiles / "os").mkdir(parents=True)
+        (profiles / "os" / "os-debian.json").write_text(json.dumps({"os_name": "Debian"}))
+        (profiles / "users").mkdir()
+        (profiles / "users" / "users-debian.json").write_text(json.dumps({"users": {"list": "getent passwd"}}))
+        (profiles / "proxy").mkdir()
+        (profiles / "proxy" / "proxy-debian.json").write_text(json.dumps({"proxy": {"reload": "true"}}))
+        core_modules, community_modules = tmp_path / "core-modules", tmp_path / "modules"
+        (core_modules / "users").mkdir(parents=True)
+        for name in ("broken", "proxy"):
+            (community_modules / name).mkdir(parents=True)
+            (community_modules / name / "manifest.json").write_text(json.dumps({"id": name}))
+        monkeypatch.setattr(engine_module.paths, "modules_candidates", lambda: [core_modules, community_modules])
+        return profiles
+
+    def load(self, profiles):
+        return FreedomNASEngine(profile_dir=str(profiles), os_override="debian")
+
+    def test_a_broken_community_fragment_is_left_out_and_reported(self, tree):
+        (tree / "broken").mkdir()
+        (tree / "broken" / "broken-debian.json").write_text('{\n  "broken": {"list": "x",}\n}')
+        engine = self.load(tree)
+        assert engine.profile["users"] == {"list": "getent passwd"}
+        assert engine.profile["proxy"] == {"reload": "true"}
+        assert "broken" not in engine.profile
+        assert list(engine.profile_failures) == ["broken"]
+        assert "broken-debian.json, line 2 column" in engine.profile_failures["broken"]
+
+    def test_a_community_fragment_that_is_not_an_object_is_left_out(self, tree):
+        (tree / "broken").mkdir()
+        (tree / "broken" / "broken-debian.json").write_text('["broken"]')
+        engine = self.load(tree)
+        assert "not a JSON object" in engine.profile_failures["broken"]
+        assert engine.profile["proxy"] == {"reload": "true"}
+
+    def test_a_broken_core_fragment_stops_the_engine_naming_the_file(self, tree):
+        (tree / "users" / "users-debian.json").write_text('{"users": ')
+        with pytest.raises(FreedomNASEngineException, match=r"users-debian\.json, line 1 column"):
+            self.load(tree)
+
+    def test_a_fragment_without_a_community_manifest_counts_as_core(self, tree):
+        (tree / "stray").mkdir()
+        (tree / "stray" / "stray-debian.json").write_text("{")
+        with pytest.raises(FreedomNASEngineException, match="stray-debian.json"):
+            self.load(tree)
+
+    def test_a_community_id_that_clashes_with_a_core_module_counts_as_core(self, tree, tmp_path):
+        (tmp_path / "modules" / "users").mkdir()
+        (tmp_path / "modules" / "users" / "manifest.json").write_text("{}")
+        (tree / "users" / "users-debian.json").write_text("{")
+        with pytest.raises(FreedomNASEngineException):
+            self.load(tree)
+
+    def test_valid_profiles_leave_no_failures(self, tree):
+        assert self.load(tree).profile_failures == {}
+
+    def test_a_reload_forgets_a_fragment_fixed_meanwhile(self, tree):
+        (tree / "broken").mkdir()
+        fragment = tree / "broken" / "broken-debian.json"
+        fragment.write_text("{")
+        engine = self.load(tree)
+        fragment.write_text(json.dumps({"broken": {"list": "x"}}))
+        engine.reload_profile()
+        assert engine.profile_failures == {}
+        assert engine.profile["broken"] == {"list": "x"}

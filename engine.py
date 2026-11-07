@@ -412,7 +412,13 @@ class FreedomNASEngine:
         fragment. Reserved directories (_RESERVED_PROFILE_DIRS) are skipped;
         a directory with no fragment for the current OS is silently skipped
         too (e.g. a community module that doesn't support this OS).
+
+        An invalid fragment of a community module is left out and recorded
+        in self.profile_failures (module id -> reason); an invalid core
+        fragment stops the engine, naming the file and the position.
         """
+        self.profile_failures: Dict[str, str] = {}
+        community = self._community_module_ids()
         for entry in sorted(self.profile_dir.iterdir()):
             if not entry.is_dir() or entry.name in self._RESERVED_PROFILE_DIRS:
                 continue
@@ -422,12 +428,33 @@ class FreedomNASEngine:
             try:
                 with open(fragment_path, "r") as f:
                     fragment = json.load(f)
-            except json.JSONDecodeError as exc:
-                raise FreedomNASEngineException(
-                    f"Invalid JSON in profile fragment {fragment_path}: {exc}"
-                )
+                if not isinstance(fragment, dict):
+                    raise ValueError("the fragment is not a JSON object")
+            except ValueError as exc:
+                if isinstance(exc, json.JSONDecodeError):
+                    reason = (f"Invalid JSON in profile fragment {fragment_path}, "
+                              f"line {exc.lineno} column {exc.colno}: {exc.msg}")
+                else:
+                    reason = f"Invalid profile fragment {fragment_path}: {exc}"
+                if entry.name not in community:
+                    raise FreedomNASEngineException(reason)
+                self.profile_failures[entry.name] = reason
+                logger.error(reason)
+                continue
             profile.update(fragment)
             logger.debug(f"Merged module profile fragment: {fragment_path}")
+
+    @staticmethod
+    def _community_module_ids() -> set:
+        """Ids of the installed community modules: a manifest in a community modules dir, not a core id."""
+        core_dir, *community_dirs = paths.modules_candidates()
+        ids = set()
+        for base in community_dirs:
+            if base.is_dir():
+                ids.update(entry.name for entry in base.iterdir() if (entry / "manifest.json").is_file())
+        if core_dir.is_dir():
+            ids.difference_update(entry.name for entry in core_dir.iterdir())
+        return ids
 
     def reload_profile(self) -> None:
         """Merge the profiles again: a module installed since the start brings its fragment."""

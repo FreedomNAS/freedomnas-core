@@ -1251,3 +1251,13 @@ def test_modules_installed_by_the_reconcile_bring_their_profiles_and_steps(monke
     assert added == ["Module proxy"]
     assert ("done", 10, []) in rec.progress.calls
     assert "proxy.done" in action_names(results)
+
+
+def test_a_community_profile_left_out_by_the_engine_is_reported(monkeypatch):
+    with_modules(monkeypatch, RecordingModule("fine"))
+    engine = FakeEngine(users={"sarah": ["sudo"]})
+    engine.profile_failures = {"broken": "Invalid JSON in profile fragment broken-debian.json, line 2 column 3: x"}
+    results = reconciler(engine, FakeConfig({"users": [ADMIN]})).reconcile()
+    assert [(r.action, r.target_state) for r in results] == [
+        ("modules.broken.profile", "failed"), ("fine.done", "applied")]
+    assert "line 2 column 3" in results[0].error
