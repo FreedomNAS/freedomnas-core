@@ -82,7 +82,7 @@ class Zfs:
             self.datasets[name] = {"mountpoint": str(self.state), "files": {}}
             return "", ""
         if action == "dataset_get_property":
-            value = self.datasets[kw["dataset"]].get(kw["property"], "-")
+            value = self.datasets.get(kw["dataset"], {}).get(kw["property"], "-")
             return f"{value}\tlocal\n", ""
         if action == "pool_get_all":
             return f"bootfs\t{self.bootfs.get(kw['pool_name'], '-')}\tdefault\n", ""
@@ -250,6 +250,18 @@ def test_a_reinstall_restores_the_data_pools_copy(tmp_path):
     restored = yaml.safe_load((zfs.state / "config.yaml").read_text())
     assert restored["system"]["hostname"] == "sarahs-box"
     assert (zfs.state / "setup-pending").read_text() == "image\n"
+
+
+def test_the_pool_a_restore_came_from_is_recorded_once_as_a_data_pool(tmp_path):
+    unrecorded = {**GENTOO, "storage": {"pools": []}}
+    zfs = Zfs(tmp_path, datasets={"tank/.freedomnas": {"config.yaml": dump(unrecorded)}})
+    (zfs.state / "config.yaml").write_text("system:\n  initialized: false\n")
+
+    shadow.boot(zfs)
+    shadow.boot(zfs)
+
+    restored = yaml.safe_load((zfs.state / "config.yaml").read_text())
+    assert restored["storage"]["pools"] == [{"name": "tank", "encrypted": False, "imported": True}]
 
 
 def test_the_copy_the_installer_was_told_to_restore_wins_over_a_newer_one(tmp_path):

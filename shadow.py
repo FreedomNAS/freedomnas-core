@@ -718,6 +718,8 @@ def boot(engine) -> Dict:
         result.update(action="restored", source=pool)
         logger.info("Restored the configuration from %s", pool)
 
+    if result["source"]:
+        _record_source(engine, config_path, result["source"])
     final = _load(config_path)
     named = {p.get("name") for p in (final.get("storage") or {}).get("pools") or []
              if isinstance(p, dict)}
@@ -727,6 +729,24 @@ def boot(engine) -> Dict:
     result["keep"] = [p for p in imported if p != root and p in named
                       and not foreign_root(engine, p, root)]
     return result
+
+
+def _record_source(engine, config_path: Path, pool: str) -> None:
+    """
+    The pool the configuration came from was in use on the system that wrote
+    it: recorded as a data pool here too, so the reconciler mounts all of it
+    as that system did, even when that system never recorded it.
+    """
+    config = _load(config_path)
+    storage = config.setdefault("storage", {})
+    pools = [p for p in storage.get("pools") or [] if isinstance(p, dict)]
+    if any(p.get("name") == pool for p in pools):
+        return
+    encryption = _property(engine, pool, "encryption")
+    storage["pools"] = pools + [{"name": pool, "encrypted": encryption not in ("", "-", "off"),
+                                 "imported": True}]
+    _write(config_path, config)
+    logger.info("Recorded %s, the configuration's source, as a data pool", pool)
 
 
 def _chosen(local: Dict, externals: List) -> tuple:
