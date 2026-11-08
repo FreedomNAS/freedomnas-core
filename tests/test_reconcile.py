@@ -956,12 +956,27 @@ def test_an_administrator_joins_the_admin_groups_this_system_has(monkeypatch):
     assert diff(desired, current) == []
 
 
-def test_without_an_administrator_no_admin_group_is_looked_up(monkeypatch):
+def test_an_account_that_does_not_administer_is_taken_out_of_the_admin_groups(monkeypatch):
+    """docker and libvirt give root's power: only administrators may have them."""
     import reconcile as reconcile_module
-    looked = []
-    monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: looked.append(1) or ["docker"])
-    diff({"users": [{"username": "luca", "groups": []}]}, {"users": [{"username": "luca", "groups": []}]})
-    assert looked == []
+    monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: ["docker", "libvirt"])
+    current = {"users": [{"username": "sarah", "groups": ["sudo", "docker", "libvirt"]},
+                         {"username": "luca", "groups": ["docker", "users"]},
+                         {"username": "anna", "groups": ["libvirt"]}]}
+    desired = {"users": [ADMIN, {"username": "luca", "groups": ["docker", "users"]},
+                         {"username": "anna", "groups": []}]}
+    changes = {c.path: c for c in diff(desired, current)}
+    assert sorted(changes) == ["users.anna", "users.luca"]
+    assert changes["users.luca"].new_value["groups"] == ["users"]
+    assert changes["users.anna"].new_value["groups"] == []
+
+
+def test_without_an_administrator_the_admin_groups_are_still_reserved(monkeypatch):
+    import reconcile as reconcile_module
+    monkeypatch.setattr(reconcile_module, "admin_groups_present", lambda engine: ["docker"])
+    [change] = diff({"users": [{"username": "luca", "groups": ["docker"]}]},
+                    {"users": [{"username": "luca", "groups": ["docker"]}]})
+    assert (change.path, change.new_value["groups"]) == ("users.luca", [])
 
 
 # ---------------------------------------------------------------------------

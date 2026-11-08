@@ -458,9 +458,13 @@ class ReconciliationEngine:
             g for g in self._admin_groups(wanted_users.values()) if g != sudo_group]
         managed |= set(admin_extra)
         for name, user in list(wanted_users.items()):
+            groups = list(user.get("groups", []))
             if admin_extra and self._is_admin(user):
-                groups = list(user.get("groups", []))
                 wanted_users[name] = {**user, "groups": groups + [g for g in admin_extra if g not in groups]}
+            elif any(g in admin_extra and g != sudo_group for g in groups):
+                logger.warning("Taking %s out of %s: only administrators may have them", name,
+                               ", ".join(g for g in groups if g in admin_extra and g != sudo_group))
+                wanted_users[name] = {**user, "groups": [g for g in groups if g not in admin_extra or g == sudo_group]}
         for name, user in wanted_users.items():
             if observed_users is not None and name not in existing:
                 changes.append(Change(f"users.{name}", None, user, "add"))
@@ -570,9 +574,11 @@ class ReconciliationEngine:
         """
         The groups administrators join here (admin_groups_present): a
         configuration restored from another edition, or written before a
-        feature was installed, does not name them.
+        feature was installed, does not name them. Only administrators may
+        be in them (docker and libvirt give root's power), so an account
+        that is not one is taken out.
         """
-        if not any(self._is_admin(u) for u in users):
+        if not users:
             return []
         try:
             return admin_groups_present(self.engine)
