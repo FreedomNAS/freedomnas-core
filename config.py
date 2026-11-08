@@ -48,8 +48,38 @@ def known_admin_groups() -> Set[str]:
     return groups
 
 
-def normalize_user(user: Dict[str, Any], admin_groups: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """A user entry with its administrators' group turned into `admin: true`."""
+def known_reserved_groups() -> Set[str]:
+    """
+    The groups administrators get with the role (`admin_groups` of every
+    package category, for every edition and init: docker, libvirt). Each
+    gives root's power, so an administrator's entry does not name them: they
+    come from `admin: true`.
+    """
+    root = paths.profiles_dir()
+    groups: Set[str] = set()
+    if not root:
+        return groups
+    for category in sorted((root / "packages").glob("*.json")):
+        try:
+            data = json.loads(category.read_text())
+        except (OSError, ValueError):
+            continue
+        for edition in data.values() if isinstance(data, dict) else []:
+            if not isinstance(edition, dict):
+                continue
+            groups.update(edition.get("admin_groups") or [])
+            for variant in (edition.get("init") or {}).values():
+                if isinstance(variant, dict):
+                    groups.update(variant.get("admin_groups") or [])
+    return groups
+
+
+def normalize_user(user: Dict[str, Any], admin_groups: Optional[Set[str]] = None,
+                   reserved_groups: Optional[Set[str]] = None) -> Dict[str, Any]:
+    """
+    A user entry with its administrators' group turned into `admin: true`,
+    and, for an administrator, without the groups that come with the role.
+    """
     admin_groups = known_admin_groups() if admin_groups is None else admin_groups
     groups = list(user.get("groups") or [])
     named = [g for g in groups if g in admin_groups]
@@ -58,6 +88,9 @@ def normalize_user(user: Dict[str, Any], admin_groups: Optional[Set[str]] = None
         entry["groups"] = [g for g in groups if g not in admin_groups]
     if named:
         entry["admin"] = True
+    if entry.get("admin") and entry.get("groups"):
+        reserved = known_reserved_groups() if reserved_groups is None else reserved_groups
+        entry["groups"] = [g for g in entry["groups"] if g not in reserved]
     return entry
 
 
@@ -265,9 +298,9 @@ class ConfigurationManager:
             raise ConfigurationException(f"Error saving configuration: {e}")
     
     def _normalize_users(self) -> None:
-        admin_groups = known_admin_groups()
+        admin_groups, reserved = known_admin_groups(), known_reserved_groups()
         self.config["users"] = [
-            normalize_user(u, admin_groups) if isinstance(u, dict) else u
+            normalize_user(u, admin_groups, reserved) if isinstance(u, dict) else u
             for u in self.config["users"]
         ]
 

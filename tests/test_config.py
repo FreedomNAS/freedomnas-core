@@ -463,10 +463,17 @@ def test_a_bridge_does_not_take_its_ports_mac_in_the_name_mapping(tmp_path):
 def test_an_administrators_group_is_recorded_as_the_admin_flag(tmp_path):
     from config import known_admin_groups, normalize_user
     assert {"sudo", "wheel"} <= known_admin_groups()
-    assert normalize_user({"username": "a", "groups": ["sudo", "docker"]}) == {
-        "username": "a", "groups": ["docker"], "admin": True}
+    assert normalize_user({"username": "a", "groups": ["sudo", "docker", "media"]}) == {
+        "username": "a", "groups": ["media"], "admin": True}
     assert normalize_user({"username": "b", "groups": ["wheel"], "admin": False})["admin"] is True
     assert normalize_user({"username": "c", "groups": ["users"]}) == {"username": "c", "groups": ["users"]}
+
+
+def test_the_groups_that_come_with_the_role_are_not_recorded():
+    from config import known_reserved_groups, normalize_user
+    assert {"docker", "libvirt"} <= known_reserved_groups()
+    assert normalize_user({"username": "a", "groups": ["libvirt", "docker", "media"], "admin": True})["groups"] == ["media"]
+    assert normalize_user({"username": "b", "groups": ["docker"]})["groups"] == ["docker"]
 
 
 def test_an_old_configuration_is_read_with_admin_flags(tmp_path):
@@ -474,7 +481,7 @@ def test_an_old_configuration_is_read_with_admin_flags(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("users:\n- username: sarah\n  groups: [sudo, docker]\n")
     manager = ConfigurationManager(config_path=str(path))
-    assert manager.get_user("sarah") == {"username": "sarah", "groups": ["docker"], "admin": True}
+    assert manager.get_user("sarah") == {"username": "sarah", "groups": [], "admin": True}
     manager.add_user({"username": "luca", "groups": ["wheel"]})
     assert manager.get_user("luca")["admin"] is True
     assert manager.get("system.saved_at")
