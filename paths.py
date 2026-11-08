@@ -81,5 +81,11 @@ def tls_dir(engine=None) -> Path:
     return config_dir(engine) / "tls"
 
 
+def run_dir(engine=None) -> Path:
+    """Runtime state that lasts until the next boot (the modules' health)."""
+    engine = engine or _engine()
+    return Path(engine.profile["paths"]["run_dir"])
+
+
 def keyslot_dir(engine=None) -> Path:
     return config_dir(engine) / "keyslots"

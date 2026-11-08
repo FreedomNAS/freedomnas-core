@@ -6,7 +6,7 @@ Commands:
   check         Validate profiles directory and config file
   unlock-pools  Unlock ZFS-encrypted pools (USB zero-touch, TTY passphrase fallback)
   reconcile     Apply configuration via the ReconciliationEngine
-  serve         Load and start all modules under the Orchestrator, run until stopped
+  serve         Check the modules until stopped: retried, then blocked (orchestrator.py)
   path          Print one of this edition's FreedomNAS directories
   version       Print package version
 """
@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
+from typing import List
 
 
 def cmd_version(_args) -> int:
@@ -329,6 +330,7 @@ def cmd_path(args) -> int:
             "state":        paths.state_dir,
             "tls":          paths.tls_dir,
             "keyslots":     paths.keyslot_dir,
+            "run":          paths.run_dir,
             "setup-pending": lambda: paths.config_dir() / "setup-pending",
             "restoring":    lambda: paths.state_dir() / "restoring.json",
         }[args.name]
@@ -432,26 +434,61 @@ def cmd_boot_ok(_args) -> int:
     return 0
 
 
+SERVE_RESTART = 75
+
+
+def _module_dirs(loader) -> List[str]:
+    try:
+        return sorted(str(m["_dir"]) for m in loader.discover())
+    except Exception:
+        return []
+
+
+def _mtime(path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def cmd_serve(_args) -> int:
+    """
+    Check the modules until stopped (see orchestrator.py). Exits with
+    SERVE_RESTART when the installed modules change, so supervisor.sh starts
+    it again with the new set; a second serve refuses to start.
+    """
+    import fcntl
+    import time
     try:
         from freedomnas.engine import get_engine
         from freedomnas.config import ConfigurationManager
         from freedomnas.orchestrator import Orchestrator
         from freedomnas.module_loader import ModuleLoader, ModuleLoaderException
+        from freedomnas import paths
     except ImportError:
         from engine import get_engine  # type: ignore
         from config import ConfigurationManager  # type: ignore
         from orchestrator import Orchestrator  # type: ignore
         from module_loader import ModuleLoader, ModuleLoaderException  # type: ignore
+        import paths  # type: ignore
 
     try:
         engine = get_engine()
         config = ConfigurationManager()
         _mirror_saves(engine, config)
-        orchestrator = Orchestrator(engine, config)
+        run = paths.run_dir(engine)
+        (run / "module-restart").mkdir(parents=True, exist_ok=True)
+        orchestrator = Orchestrator(engine, config, run_dir=run)
         loader = ModuleLoader(engine, config)
     except Exception as exc:
         print(f"ERROR: could not initialise: {exc}", file=sys.stderr)
+        return 1
+
+    lock = open(run / "serve.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("ERROR: another serve is already checking the modules", file=sys.stderr)
         return 1
 
     try:
@@ -459,16 +496,14 @@ def cmd_serve(_args) -> int:
     except ModuleLoaderException as exc:
         print(f"ERROR: module discovery failed: {exc}", file=sys.stderr)
         return 1
-
     for module_id, reason in sorted(loader.failed.items()):
         print(f"ERROR: module {module_id} not loaded: {reason}", file=sys.stderr)
-    if not registered:
-        print("WARNING: no modules registered", file=sys.stderr)
-    else:
-        print(f"Registered modules: {', '.join(registered)}")
+    print(f"Checking modules: {', '.join(registered) or 'none'}")
 
+    installed = _module_dirs(loader)
+    config_mtime = _mtime(config.config_path)
+    orchestrator.keep_blocked()
     orchestrator.start_all()
-    print("Orchestrator started. Press Ctrl+C to stop.")
 
     stop_event = threading.Event()
 
@@ -478,10 +513,31 @@ def cmd_serve(_args) -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    stop_event.wait()
-    print("\nStopping...", file=sys.stderr)
+    code = 0
+    last_write = 0.0
+    while not stop_event.is_set():
+        if _module_dirs(loader) != installed:
+            print("The installed modules changed: starting again", file=sys.stderr)
+            code = SERVE_RESTART
+            break
+        mtime = _mtime(config.config_path)
+        if mtime != config_mtime:
+            config_mtime = mtime
+            try:
+                config.load()
+            except Exception as exc:
+                print(f"WARNING: could not read the configuration again: {exc}", file=sys.stderr)
+        changed = orchestrator.take_restart_requests() + orchestrator.check_due()
+        if changed or time.monotonic() - last_write >= 10:
+            try:
+                orchestrator.write()
+                last_write = time.monotonic()
+            except OSError as exc:
+                print(f"WARNING: could not write the modules' health: {exc}", file=sys.stderr)
+        stop_event.wait(1)
+
     orchestrator.stop_all()
-    return 0
+    return code
 
 
 def main() -> int:
@@ -570,7 +626,7 @@ def main() -> int:
     )
     path_parser = sub.add_parser("path", help="Print one of this edition's FreedomNAS directories")
     path_parser.add_argument("name", choices=["install-root", "config", "state", "tls", "keyslots", "setup-pending",
-                                              "restoring"])
+                                              "restoring", "run"])
     offline_parser = sub.add_parser(
         "restore-offline",
         help="Before the first boot (an installer's chroot): put back the identity and install the modules "
@@ -587,7 +643,7 @@ def main() -> int:
         "boot-ok",
         help="Confirm the boot: ends a new kernel's trial before an automatic rollback",
     )
-    sub.add_parser("serve", help="Load and start all modules under the Orchestrator, run until stopped")
+    sub.add_parser("serve", help="Check the modules until stopped: retried, then blocked")
     sub.add_parser("version", help="Print package version")
 
     args = parser.parse_args()

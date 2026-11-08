@@ -183,8 +183,10 @@ class ModuleLoader:
         registered = []
         for manifest, instance in self.instances():
             module_id = manifest.get("id", manifest["_dir"].name)
-            orchestrator.register(instance)
+            orchestrator.register(instance, module_id, manifest.get("name", module_id))
             registered.append(module_id)
             logger.info("Module '%s' loaded and registered", module_id)
 
+        for module_id, reason in sorted(self.failed.items()):
+            orchestrator.mark_failed(module_id, reason)
         return registered

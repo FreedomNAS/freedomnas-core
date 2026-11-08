@@ -1,30 +1,38 @@
 """
-FreedomNAS Orchestrator — Module lifecycle management with heartbeat monitoring.
+FreedomNAS Orchestrator — keeps the modules checked while the NAS runs.
 
-Manages the lifecycle of FreedomNAS Python modules (storage, network, shares,
-etc.) through a unified interface. A background heartbeat thread periodically
-checks each module's health and applies a circuit breaker when a module fails
-repeatedly (spec §9.2: stop after 5 consecutive failures).
+`python -m freedomnas serve`, started by supervisor.sh next to the WebUI,
+registers every module and calls check_due() about once a second. Each
+module is checked every CHECK_INTERVAL seconds: start() (it reads the
+configuration again) and health(), together within CHECK_TIMEOUT seconds.
 
-Usage:
-    engine = get_engine()
-    config = ConfigurationManager()
-    orch = Orchestrator(engine, config)
-    orch.register(MyModule(engine, config))
-    orch.start_all()
-    ...
-    orch.stop_all()
+  healthy  — health() said yes
+  problem  — health() said no: a real state of the system (a degraded pool,
+             a broken disk). Shown, checked again, never blocks the module;
+             it turns healthy by itself
+  retrying — the module raised or did not answer in time: it is stopped and
+             started again after RETRY_DELAYS (10, 20, 30, 60 s)
+  blocked  — the last of those tries failed too: left alone until someone
+             asks for a restart (a file named after it in <run>/module-restart)
+  failed   — the module could not be loaded at all
+
+The state is written to <run>/module-health.json, which the WebUI reads.
+A module blocked there stays blocked when serve starts again.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
+import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:
     from freedomnas.engine import FreedomNASEngine
@@ -35,50 +43,46 @@ except ImportError:
 
 logger = logging.getLogger("FreedomNAS.Orchestrator")
 
-# Circuit breaker threshold (spec §9.2)
-MAX_FAILURES = 5
-# Seconds between heartbeat checks
-HEARTBEAT_INTERVAL = 30
+CHECK_INTERVAL = 30
+CHECK_TIMEOUT = 5
+RETRY_DELAYS = (10, 20, 30, 60)
+HEALTH_FILE = "module-health.json"
+RESTART_DIR = "module-restart"
 
-
-# ---------------------------------------------------------------------------
-# Module state
-# ---------------------------------------------------------------------------
 
 class ModuleState(str, Enum):
-    STOPPED  = "stopped"
     STARTING = "starting"
-    RUNNING  = "running"
-    FAILED   = "failed"
-    DISABLED = "disabled"
+    HEALTHY = "healthy"
+    PROBLEM = "problem"
+    RETRYING = "retrying"
+    BLOCKED = "blocked"
+    FAILED = "failed"
 
 
 @dataclass
 class ModuleStatus:
+    id: str
     name: str
-    state: ModuleState
-    last_heartbeat: Optional[datetime] = None
-    failure_count: int = 0
-    error: Optional[str] = None
+    state: ModuleState = ModuleState.STARTING
+    detail: str = ""
+    attempt: int = 0
+    checked_at: Optional[str] = None
+    next_check: float = field(default=0.0, repr=False)
 
-    def is_healthy(self) -> bool:
-        return self.state == ModuleState.RUNNING
+    def as_dict(self) -> dict:
+        entry = {"id": self.id, "name": self.name, "state": self.state.value,
+                 "detail": self.detail, "checked_at": self.checked_at}
+        if self.state == ModuleState.RETRYING:
+            entry["attempt"] = self.attempt
+            entry["attempts"] = len(RETRY_DELAYS)
+        return entry
 
-    def is_circuit_open(self) -> bool:
-        """Return True when the circuit breaker has tripped (too many failures)."""
-        return self.failure_count >= MAX_FAILURES
-
-
-# ---------------------------------------------------------------------------
-# Module base class
-# ---------------------------------------------------------------------------
 
 class FreedomNASModule(ABC):
     """
     Abstract base for all FreedomNAS pluggable modules.
 
     Subclasses implement start(), stop(), and health_check().
-    The orchestrator calls health_check() periodically via the heartbeat thread.
     """
 
     def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager):
@@ -101,9 +105,10 @@ class FreedomNASModule(ABC):
     @abstractmethod
     def health_check(self) -> bool:
         """
-        Return True if the module is operating normally.
-        Called by the heartbeat thread every HEARTBEAT_INTERVAL seconds.
-        Must not raise — catch all exceptions internally and return False.
+        Return True if the module is operating normally, False when what it
+        manages is not (a degraded pool): that is a state to show, not a
+        failure of the module. Raising, or not answering within
+        CHECK_TIMEOUT, is a failure.
         """
 
     def health(self) -> Tuple[bool, str]:
@@ -146,231 +151,179 @@ class FreedomNASModule(ABC):
         return []
 
 
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 class Orchestrator:
     """
-    Manages the lifecycle of registered FreedomNAS modules.
-
-    Responsibilities:
-    - Start and stop modules in registration order (reverse for stop)
-    - Run a background heartbeat thread that calls health_check() on each module
-    - Apply circuit breaker: after MAX_FAILURES consecutive health-check failures,
-      mark the module DISABLED and stop retrying (spec §9.2)
-    - Provide status queries for the WebUI and the supervisor wrapper
+    Checks the registered modules, retries and blocks the ones that fail,
+    and writes what it found for the WebUI.
     """
 
-    def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager):
+    def __init__(self, engine: FreedomNASEngine, config: ConfigurationManager,
+                 run_dir: Optional[Path] = None, clock: Callable[[], float] = time.monotonic):
         self._engine = engine
         self._config = config
+        self._run_dir = Path(run_dir) if run_dir else None
+        self._clock = clock
         self._modules: Dict[str, FreedomNASModule] = {}
         self._status: Dict[str, ModuleStatus] = {}
-        self._order: List[str] = []          # registration order
+        self._order: List[str] = []
+        self._busy: Dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
-        self._heartbeat_thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
-
-    def register(self, module: FreedomNASModule) -> None:
-        """
-        Register a module with the orchestrator.
-
-        Must be called before start_all(). Registering the same name twice
-        replaces the previous module.
-        """
+    def register(self, module: FreedomNASModule, module_id: Optional[str] = None,
+                 name: Optional[str] = None) -> None:
+        module_id = module_id or module.name
         with self._lock:
-            name = module.name
-            self._modules[name] = module
-            self._status[name] = ModuleStatus(name=name, state=ModuleState.STOPPED)
-            if name not in self._order:
-                self._order.append(name)
-            logger.debug("Module registered: %s", name)
+            self._modules[module_id] = module
+            self._status[module_id] = ModuleStatus(id=module_id, name=name or module_id)
+            if module_id not in self._order:
+                self._order.append(module_id)
 
-    # ------------------------------------------------------------------
-    # Lifecycle — bulk operations
-    # ------------------------------------------------------------------
-
-    def start_all(self) -> None:
-        """Start all registered modules in registration order, then begin heartbeat."""
-        logger.info("Starting all modules (%d registered)", len(self._modules))
-        for name in self._order:
-            self.start_module(name)
-        self._start_heartbeat()
-
-    def stop_all(self) -> None:
-        """Stop heartbeat, then stop all modules in reverse registration order."""
-        self._stop_heartbeat()
-        for name in reversed(self._order):
-            self.stop_module(name)
-        logger.info("All modules stopped")
-
-    # ------------------------------------------------------------------
-    # Lifecycle — individual modules
-    # ------------------------------------------------------------------
-
-    def start_module(self, name: str) -> None:
-        """Start a single module by name."""
+    def mark_failed(self, module_id: str, reason: str) -> None:
+        """A module that could not be loaded: listed, never checked."""
         with self._lock:
-            if name not in self._modules:
-                raise KeyError(f"Module not registered: {name}")
-            status = self._status[name]
-            if status.state == ModuleState.DISABLED:
-                logger.warning("Module %s is disabled (circuit open); skipping start", name)
-                return
-            if status.state == ModuleState.RUNNING:
-                logger.debug("Module %s already running", name)
-                return
-            status.state = ModuleState.STARTING
+            self._status[module_id] = ModuleStatus(id=module_id, name=module_id,
+                                                   state=ModuleState.FAILED, detail=reason)
+            if module_id not in self._order:
+                self._order.append(module_id)
 
-        module = self._modules[name]
-        try:
-            module.start()
-            with self._lock:
-                self._status[name].state = ModuleState.RUNNING
-                self._status[name].last_heartbeat = datetime.now()
-                self._status[name].error = None
-            logger.info("Module started: %s", name)
-        except Exception as exc:
-            with self._lock:
-                self._status[name].state = ModuleState.FAILED
-                self._status[name].error = str(exc)
-            logger.error("Module %s failed to start: %s", name, exc)
-
-    def stop_module(self, name: str) -> None:
-        """Stop a single module by name."""
-        with self._lock:
-            if name not in self._modules:
-                raise KeyError(f"Module not registered: {name}")
-            if self._status[name].state == ModuleState.STOPPED:
-                return
-
-        module = self._modules[name]
-        try:
-            module.stop()
-        except Exception as exc:
-            logger.warning("Module %s raised during stop: %s", name, exc)
-        finally:
-            with self._lock:
-                self._status[name].state = ModuleState.STOPPED
-            logger.info("Module stopped: %s", name)
-
-    def restart_module(self, name: str) -> None:
-        """Stop then start a module, resetting its failure count and re-enabling after a circuit trip."""
-        with self._lock:
-            if name not in self._modules:
-                raise KeyError(f"Module not registered: {name}")
-            self._status[name].failure_count = 0
-            self._status[name].state = ModuleState.STOPPED
-
-        self.stop_module(name)
-        self.start_module(name)
-
-    # ------------------------------------------------------------------
-    # Status queries
-    # ------------------------------------------------------------------
+    def list_modules(self) -> List[str]:
+        return list(self._order)
 
     def get_status(self) -> Dict[str, ModuleStatus]:
-        """Return a snapshot of all module statuses."""
         with self._lock:
             return dict(self._status)
 
-    def get_module_status(self, name: str) -> ModuleStatus:
-        """Return the status of a single module."""
-        with self._lock:
-            if name not in self._status:
-                raise KeyError(f"Module not registered: {name}")
-            return self._status[name]
-
-    def list_modules(self) -> List[str]:
-        """Return module names in registration order."""
-        return list(self._order)
-
-    # ------------------------------------------------------------------
-    # Heartbeat — internal
-    # ------------------------------------------------------------------
-
-    def _start_heartbeat(self) -> None:
-        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            name="fnas-heartbeat",
-            daemon=True,
-        )
-        self._heartbeat_thread.start()
-        logger.debug("Heartbeat thread started (interval=%ds)", HEARTBEAT_INTERVAL)
-
-    def _stop_heartbeat(self) -> None:
-        self._stop_event.set()
-        if self._heartbeat_thread:
-            self._heartbeat_thread.join(timeout=HEARTBEAT_INTERVAL + 5)
-        logger.debug("Heartbeat thread stopped")
-
-    def _heartbeat_loop(self) -> None:
-        """Background thread: check all running modules every HEARTBEAT_INTERVAL seconds."""
-        while not self._stop_event.wait(timeout=HEARTBEAT_INTERVAL):
-            with self._lock:
-                names = list(self._order)
-            for name in names:
-                self._check_module(name)
-
-    def _check_module(self, name: str) -> None:
-        """
-        Run health_check() on one module and apply the circuit breaker.
-
-        On success: reset failure_count, update last_heartbeat.
-        On failure: increment failure_count.
-        At MAX_FAILURES: mark DISABLED — circuit open, no more restarts.
-        """
-        with self._lock:
-            status = self._status.get(name)
-            if status is None or status.state not in (ModuleState.RUNNING, ModuleState.FAILED):
-                return
-            if status.is_circuit_open():
-                return
-
-        module = self._modules[name]
+    def keep_blocked(self) -> None:
+        """Modules the previous serve left blocked stay blocked."""
         try:
-            healthy = module.health_check()
-        except Exception as exc:
-            healthy = False
-            logger.warning("Module %s health_check raised: %s", name, exc)
+            data = json.loads(self._file(HEALTH_FILE).read_text())
+        except (OSError, ValueError, TypeError):
+            return
+        for entry in data.get("modules") or []:
+            status = self._status.get(entry.get("id"))
+            if status and entry.get("state") == ModuleState.BLOCKED.value and status.id in self._modules:
+                status.state = ModuleState.BLOCKED
+                status.detail = entry.get("detail") or ""
+                status.checked_at = entry.get("checked_at")
 
-        with self._lock:
-            status = self._status[name]
-            if healthy:
-                status.state = ModuleState.RUNNING
-                status.last_heartbeat = datetime.now()
-                status.failure_count = 0
-                status.error = None
-            else:
-                status.failure_count += 1
-                status.state = ModuleState.FAILED
-                logger.warning(
-                    "Module %s unhealthy (failure %d/%d)",
-                    name, status.failure_count, MAX_FAILURES,
-                )
-                if status.is_circuit_open():
-                    status.state = ModuleState.DISABLED
-                    logger.error(
-                        "Module %s circuit breaker OPEN — "
-                        "disabled after %d consecutive failures",
-                        name, MAX_FAILURES,
-                    )
+    def start_all(self) -> None:
+        for module_id in self._order:
+            if module_id in self._modules and self._status[module_id].state != ModuleState.BLOCKED:
+                self._status[module_id].next_check = self._clock()
 
-    # ------------------------------------------------------------------
-    # Representation
-    # ------------------------------------------------------------------
+    def stop_all(self) -> None:
+        for module_id in reversed(self._order):
+            module = self._modules.get(module_id)
+            if module is None:
+                continue
+            try:
+                module.stop()
+            except Exception as exc:
+                logger.warning("Module %s raised during stop: %s", module_id, exc)
+
+    def take_restart_requests(self) -> List[str]:
+        """Restart requests left by the WebUI: the module is checked again at once."""
+        taken: List[str] = []
+        try:
+            requests = sorted(self._file(RESTART_DIR).iterdir())
+        except OSError:
+            return taken
+        for request in requests:
+            try:
+                request.unlink()
+            except OSError:
+                continue
+            status = self._status.get(request.name)
+            if status is None or request.name not in self._modules:
+                continue
+            status.state = ModuleState.STARTING
+            status.attempt = 0
+            status.detail = ""
+            status.next_check = self._clock()
+            taken.append(request.name)
+            logger.info("Module %s restarted on request", request.name)
+        return taken
+
+    def check_due(self) -> List[str]:
+        """Check every module whose time has come. Returns their ids."""
+        now = self._clock()
+        due = [m for m in self._order if m in self._modules
+               and self._status[m].state not in (ModuleState.BLOCKED, ModuleState.FAILED)
+               and self._status[m].next_check <= now]
+        for module_id in due:
+            self._check(module_id)
+        return due
+
+    def _check(self, module_id: str) -> None:
+        status = self._status[module_id]
+        retry = status.state == ModuleState.RETRYING
+        outcome = self._call(module_id, self._modules[module_id], retry)
+        status.checked_at = _now()
+        if outcome[0] == "ok":
+            healthy, detail = outcome[1]
+            status.state = ModuleState.HEALTHY if healthy else ModuleState.PROBLEM
+            status.detail = detail
+            status.attempt = 0
+            status.next_check = self._clock() + CHECK_INTERVAL
+            return
+        status.detail = outcome[1]
+        if retry and status.attempt >= len(RETRY_DELAYS):
+            status.state = ModuleState.BLOCKED
+            logger.error("Module %s blocked after %d tries: %s", module_id, status.attempt, status.detail)
+            return
+        status.attempt = status.attempt + 1 if retry else 1
+        status.state = ModuleState.RETRYING
+        delay = RETRY_DELAYS[status.attempt - 1]
+        status.next_check = self._clock() + delay
+        logger.warning("Module %s failed (%s): try %d of %d in %d s", module_id, status.detail,
+                       status.attempt, len(RETRY_DELAYS), delay)
+
+    def _call(self, module_id: str, module: FreedomNASModule, restart: bool) -> tuple:
+        previous = self._busy.get(module_id)
+        if previous is not None and previous.is_alive():
+            return ("failed", f"still busy with a check started more than {CHECK_TIMEOUT} s ago")
+        result: list = []
+
+        def run():
+            try:
+                if restart:
+                    module.stop()
+                module.start()
+                result.append(("ok", module.health()))
+            except Exception as exc:
+                result.append(("failed", f"{type(exc).__name__}: {exc}"))
+
+        worker = threading.Thread(target=run, name=f"fnas-check-{module_id}", daemon=True)
+        self._busy[module_id] = worker
+        worker.start()
+        worker.join(CHECK_TIMEOUT)
+        if worker.is_alive() or not result:
+            return ("failed", f"did not answer within {CHECK_TIMEOUT} s")
+        return result[0]
+
+    def _file(self, name: str) -> Path:
+        if self._run_dir is None:
+            raise OSError("no run directory")
+        return self._run_dir / name
+
+    def write(self) -> None:
+        """The state for the WebUI, replaced in one step."""
+        if self._run_dir is None:
+            return
+        data = {"pid": os.getpid(), "updated_at": _now(), "interval": CHECK_INTERVAL,
+                "modules": [self._status[m].as_dict() for m in self._order]}
+        target = self._file(HEALTH_FILE)
+        temporary = target.with_name(f".{HEALTH_FILE}.{os.getpid()}")
+        temporary.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(temporary, target)
 
     def __repr__(self) -> str:
-        counts = {}
+        counts: Dict[str, int] = {}
         for s in self._status.values():
-            counts[s.state] = counts.get(s.state, 0) + 1
+            counts[s.state.value] = counts.get(s.state.value, 0) + 1
         summary = ", ".join(f"{k}={v}" for k, v in counts.items())
         return f"Orchestrator(modules={len(self._modules)}, {summary})"
