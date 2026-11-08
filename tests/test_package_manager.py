@@ -179,15 +179,10 @@ def test_module_package_lines_name_the_module_and_its_package():
         "proxy": {"package": "extra/freedomnas-module-proxy", "version": "0.2", "description": "Caddy"}}
 
 
-def test_the_running_inits_variant_stands_for_the_module():
+def test_the_profiles_pattern_reads_the_module_id():
     from package_manager import parse_module_packages
-    text = ("freedomnas-module-containers\t1.0\tbase\n"
-            "freedomnas-module-containers-dinit\t1.0\tdinit\n"
-            "freedomnas-module-containers-openrc\t1.0\topenrc\n"
-            "freedomnas-module-example\t0.1\tno variants\n")
-    found = parse_module_packages(text, "-openrc", ("-openrc", "-dinit", "-runit", "-s6"))
+    pattern = r"(?:[a-z0-9][a-z0-9+_.-]*/)?freedomnas-module-([a-z0-9][a-z0-9_-]{0,62}?)(?:-openrc)?"
+    text = "freedomnas-module-containers-openrc\t1.0\topenrc\nfreedomnas-module-example\t0.1\tplain\n"
+    found = parse_module_packages(text, pattern)
     assert {k: v["package"] for k, v in found.items()} == {
         "containers": "freedomnas-module-containers-openrc", "example": "freedomnas-module-example"}
-    reversed_order = "\n".join(reversed(text.splitlines()))
-    assert parse_module_packages(reversed_order, "-openrc", ("-openrc", "-dinit"))["containers"]["package"] \
-        == "freedomnas-module-containers-openrc"

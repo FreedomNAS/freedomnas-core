@@ -259,57 +259,35 @@ if __name__ == "__main__":
 MODULE_PACKAGE = re.compile(r"(?:[a-z0-9][a-z0-9+_.-]*/)?freedomnas-module-([a-z0-9][a-z0-9_-]{0,62})")
 
 
-def parse_module_packages(text: str, own_suffix: str = "", init_suffixes=()) -> Dict[str, Dict[str, str]]:
+def parse_module_packages(text: str, pattern=MODULE_PACKAGE) -> Dict[str, Dict[str, str]]:
     """
     The name<TAB>version<TAB>description lines of module_search or
     module_installed, as {module id: {"package", "version", "description"}}.
-
-    An edition whose module packages come in one variant per init (Artix:
-    freedomnas-module-containers-openrc, -dinit…, each depending on that
-    init's service packages) names every variant's suffix in
-    `packages.module_suffixes` and the running init's in
-    `packages.module_suffix`: the running init's variant stands for the
-    module, the other inits' are left out, and a package without a suffix is
-    kept only for a module that has no variant for this init.
+    `pattern` (the profile's `packages.module_pattern`) matches a package
+    name whole and captures the module's id.
     """
-    others = tuple(s for s in init_suffixes if s and s != own_suffix)
+    pattern = re.compile(pattern) if isinstance(pattern, str) else pattern
     found: Dict[str, Dict[str, str]] = {}
-    variant: Dict[str, bool] = {}
     for line in text.splitlines():
         fields = line.split("\t", 2)
         if len(fields) < 2:
             continue
         package = fields[0].strip()
-        match = MODULE_PACKAGE.fullmatch(package)
-        if not match:
-            continue
-        module_id = match.group(1)
-        if others and module_id.endswith(others):
-            continue
-        is_variant = bool(own_suffix) and module_id.endswith(own_suffix)
-        if is_variant:
-            module_id = module_id[:-len(own_suffix)]
-        if variant.get(module_id) and not is_variant:
-            continue
-        variant[module_id] = is_variant
-        found[module_id] = {"package": package, "version": fields[1].strip(),
-                            "description": fields[2].strip() if len(fields) > 2 else ""}
+        match = pattern.fullmatch(package)
+        if match:
+            found[match.group(1)] = {"package": package, "version": fields[1].strip(),
+                                     "description": fields[2].strip() if len(fields) > 2 else ""}
     return found
-
-
-def _packages_value(engine, key: str):
-    try:
-        value = engine.get_profile_value("packages", key)
-    except Exception:
-        return None
-    return value
 
 
 def module_package_entries(engine, action: str = "module_search") -> Dict[str, Dict[str, str]]:
     """parse_module_packages() of the profile's module_search or module_installed."""
     stdout, _ = engine.execute("packages", action, timeout=300, check=False)
-    return parse_module_packages(stdout, _packages_value(engine, "module_suffix") or "",
-                                 _packages_value(engine, "module_suffixes") or ())
+    try:
+        pattern = engine.get_profile_value("packages", "module_pattern")
+    except Exception:
+        pattern = MODULE_PACKAGE
+    return parse_module_packages(stdout, pattern)
 
 
 def module_packages(engine, action: str = "module_search") -> Dict[str, str]:
