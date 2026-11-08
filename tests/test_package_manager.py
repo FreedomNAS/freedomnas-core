@@ -169,3 +169,25 @@ def test_admin_groups_present_keeps_only_the_groups_that_exist():
     assert admin_groups_present(_GroupEngine({"docker"})) == ["docker"]
     assert admin_groups_present(_GroupEngine(set())) == []
     assert admin_groups_present(_GroupEngine({"docker"}, os_type="freebsd", init_system="bsd_rc")) == []
+
+
+def test_module_package_lines_name_the_module_and_its_package():
+    from package_manager import parse_module_packages
+    text = "freedomnas-module-containers\t1.0\tDocker\nextra/freedomnas-module-proxy\t0.2\tCaddy\nother\t1\tx\n"
+    assert parse_module_packages(text) == {
+        "containers": {"package": "freedomnas-module-containers", "version": "1.0", "description": "Docker"},
+        "proxy": {"package": "extra/freedomnas-module-proxy", "version": "0.2", "description": "Caddy"}}
+
+
+def test_the_running_inits_variant_stands_for_the_module():
+    from package_manager import parse_module_packages
+    text = ("freedomnas-module-containers\t1.0\tbase\n"
+            "freedomnas-module-containers-dinit\t1.0\tdinit\n"
+            "freedomnas-module-containers-openrc\t1.0\topenrc\n"
+            "freedomnas-module-example\t0.1\tno variants\n")
+    found = parse_module_packages(text, "-openrc", ("-openrc", "-dinit", "-runit", "-s6"))
+    assert {k: v["package"] for k, v in found.items()} == {
+        "containers": "freedomnas-module-containers-openrc", "example": "freedomnas-module-example"}
+    reversed_order = "\n".join(reversed(text.splitlines()))
+    assert parse_module_packages(reversed_order, "-openrc", ("-openrc", "-dinit"))["containers"]["package"] \
+        == "freedomnas-module-containers-openrc"
