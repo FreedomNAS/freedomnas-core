@@ -1,3 +1,20 @@
+freedomnas-core (0.9.20-1) unstable; urgency=medium
+
+  * Community modules loaded with the core ones, each on its own; invalid
+    or conflicting profile fragments left out and reported; module checks
+    retried and failing modules blocked
+  * Configuration kept on the root pool and mirrored to the data pools
+    after every save, with the certificate authority and SSH host keys
+  * Restore from a data pool: identity, accounts with their own numbers,
+    modules and group shares, before the first boot
+  * Group shares with their groups, inherited ACLs and app entries
+  * WebUI certificate from FreedomNAS's own CA for every name and address
+  * Snapshot schedules that include the datasets inside; FreeBSD updates
+    into a boot environment on trial
+  * docker and libvirt for administrators only
+
+ -- FreedomNAS Team <dev@freedomnas.io>  Wed, 18 Nov 2026 17:28:25 +0000
+
 freedomnas-core (0.9.12-1) unstable; urgency=medium
 
   * Automatic rollback of a kernel update that does not boot: boot
