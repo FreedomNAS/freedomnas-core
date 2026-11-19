@@ -1,9 +1,8 @@
 name: tests
 
+# Switched off: the tests run on GitHub.
 on:
-  push:
-    branches: [dev, main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   pytest:

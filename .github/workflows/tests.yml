@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install git for the checkout
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git python3 python3-pytest python3-yaml python3-cryptography
+
+      - name: Fetch the profiles the tests translate against
+        run: |
+          git clone --depth 1 --branch dev \
+            https://github.com/FreedomNAS/freedomnas-profiles.git \
+            "$(dirname "$PWD")/freedomnas-profiles"
+
+      - name: Test
+        run: python3 -m pytest tests/ -q
