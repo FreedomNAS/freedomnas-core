@@ -1,3 +1,11 @@
+freedomnas-core (0.9.21-1) unstable; urgency=medium
+
+  * Project, package repositories, images, documentation and website moved
+    from Codeberg to GitHub
+  * Tests pass under dash too
+
+ -- FreedomNAS Team <dev@freedomnas.io>  Thu, 19 Nov 2026 04:00:00 +0000
+
 freedomnas-core (0.9.20-1) unstable; urgency=medium
 
   * Community modules loaded with the core ones, each on its own; invalid
