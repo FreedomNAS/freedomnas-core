@@ -24,7 +24,7 @@ case "$1" in
       printf 'data%s' "$i"
       sleep "${FAKE_SLEEP:-0}" & wait $!
     done ;;
-  receive) cat <&0 > "$FAKE_RECEIVED" & wait $! ;;
+  receive) exec 3<&0; cat <&3 > "$FAKE_RECEIVED" & wait $! ;;
   get) printf 'tank/a\t-\nbackup/a\t1-abc-def\n' ;;
 esac
 """
