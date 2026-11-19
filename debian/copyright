@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: freedomnas-core
 Upstream-Contact: FreedomNAS Team <dev@freedomnas.io>
-Source: https://codeberg.org/freedomnas/freedomnas-core
+Source: https://github.com/FreedomNAS/freedomnas-core
 
 Files: *
 Copyright: 2026 FreedomNAS Team

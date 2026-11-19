@@ -4,9 +4,9 @@ Priority: optional
 Maintainer: FreedomNAS Team <dev@freedomnas.io>
 Standards-Version: 4.6.2
 Build-Depends: debhelper-compat (= 13), dh-python, python3
-Homepage: https://codeberg.org/freedomnas/freedomnas-core
-Vcs-Browser: https://codeberg.org/freedomnas/freedomnas-core
-Vcs-Git: https://codeberg.org/freedomnas/freedomnas-core.git
+Homepage: https://github.com/FreedomNAS/freedomnas-core
+Vcs-Browser: https://github.com/FreedomNAS/freedomnas-core
+Vcs-Git: https://github.com/FreedomNAS/freedomnas-core.git
 
 Package: freedomnas-core
 Architecture: all

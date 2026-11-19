@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://codeberg.org/FreedomNAS/freedomnas-core"
+Homepage = "https://github.com/FreedomNAS/freedomnas-core"
 
 [project.scripts]
 freedomnas = "freedomnas.__main__:main"
