@@ -20,13 +20,14 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git python3 python3-pytest python3-yaml python3-cryptography
+            git procps python3 python3-pytest python3-yaml python3-cryptography
 
-      - name: Fetch the profiles the tests translate against
+      - name: Fetch the profiles and the installer the tests check against
         run: |
-          git clone --depth 1 --branch dev \
-            https://github.com/FreedomNAS/freedomnas-profiles.git \
-            "$(dirname "$PWD")/freedomnas-profiles"
+          for repo in freedomnas-profiles freedomnas-installer; do
+            git clone --depth 1 --branch dev \
+              "https://github.com/FreedomNAS/$repo.git" "$(dirname "$PWD")/$repo"
+          done
 
       - name: Test
         run: python3 -m pytest tests/ -q
